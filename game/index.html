@@ -1,0 +1,2645 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SHADE</title>
+<style>
+  /* Press Start 2P (SIL Open Font License), bundled so the game works offline */
+  @font-face { font-family: 'Press Start 2P'; font-style: normal; font-weight: 400; font-display: swap; src: url(vendor/PressStart2P.woff2) format('woff2'); }
+</style>
+<style>
+  html, body { margin: 0; height: 100%; background: #04030a; overflow: hidden; }
+  #game { width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<button id="mute" type="button" aria-label="Mute sound" aria-pressed="false"></button>
+<style>
+  #mute { position: fixed; left: calc(12px + env(safe-area-inset-left, 0px)); bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    width: 44px; height: 44px; display: grid; place-items: center; padding: 0; cursor: pointer; z-index: 10;
+    background: rgba(12, 9, 24, 0.8); border: 1px solid rgba(255, 179, 71, 0.55); border-radius: 10px; color: #ffd27a; }
+  #mute:hover { background: rgba(40, 28, 64, 0.9); border-color: #ffb347; }
+  #mute:focus-visible { outline: 2px solid #ffb347; outline-offset: 2px; }
+  #mute[aria-pressed="true"] { color: #8a80b0; border-color: rgba(138, 128, 176, 0.6); }
+  #mute svg { width: 22px; height: 22px; }
+</style>
+<script src="vendor/phaser.min.js"></script>
+<script>
+// =====================================================================
+//  SHADE — "You are his shadow."
+//  A scared kid, one candle, one terrifying night. You are his giant
+//  shadow on the wall — and your shadow can transform: HAND, WOLF, RAVEN.
+//  ~3 minutes of rooms, each a different challenge, PS5-style:
+//  cold open, freeze-frame intros, slow-mo finishers, room ratings, boss QTE.
+// =====================================================================
+const W = 960, H = 540, FLOOR = 470;
+const FONT = '"Press Start 2P", monospace';
+const ADD = 'ADD';
+
+const TUNE = {
+  runSpeed: 130, darkSpeed: 90,
+  waxMax: 90, courage: 3,
+  scaleGiant: 8, scaleNormal: 5,
+  lightGiant: 0, lightNormal: 95,
+  giantBurn: 2.0,
+  reachPerScale: 30, handPerScale: 5,
+  comboWindow: 2.0,
+  chaseSpeed: 112,
+  wolfCool: 0.75, wolfLen: 470, ravenCool: 1.4, ravenCount: 6,
+};
+
+const MONSTER = {
+  wisp:    { r: 12, hp: 1, sp: 95,  grab: true,  lunge: true,  score: 100 },
+  brute:   { r: 26, hp: 3, sp: 46,  grab: false, lunge: false, score: 300 },
+  snuffer: { r: 10, hp: 1, sp: 130, grab: true,  lunge: false, score: 150 },
+};
+
+const FORMS = {
+  hand:  { key: '1', name: 'HAND',  color: '#c9a8ff', tip: 'CLICK SMASH  -  HOLD & RELEASE TO THROW' },
+  wolf:  { key: '2', name: 'WOLF',  color: '#ffb347', tip: 'CLICK TO DASH THROUGH EVERYTHING' },
+  raven: { key: '3', name: 'RAVEN', color: '#7fe8ff', tip: 'CLICK TO RELEASE THE FLOCK' },
+};
+
+const POWER_ROOM = 4;          // STOP THE CLOCK unlocks in the chase (room index 4)
+function fmtClock(mins, secs) {
+  const h = Math.floor(mins / 60) % 24, m = Math.floor(mins % 60), h12 = ((h + 11) % 12) + 1;
+  return h12 + ':' + String(m).padStart(2, '0') + (secs !== undefined ? ':' + String(secs).padStart(2, '0') : '') + (h < 12 ? ' AM' : ' PM');
+}
+const Best = {
+  get() { try { return JSON.parse(localStorage.getItem('shade_best') || '{}'); } catch (e) { return {}; } },
+  set(v) { try { localStorage.setItem('shade_best', JSON.stringify(v)); } catch (e) {} },
+};
+const CONTROLS = [['MOUSE', 'MOVE YOUR SHADOW HAND'], ['CLICK', 'SMASH'], ['HOLD + LET GO', 'GRAB & THROW'], ['RIGHT-CLICK / SPACE', 'GIANT SHADOW'], ['1  2  3', 'HAND / WOLF / RAVEN'], ['F', 'STOP TIME'], ['ESC', 'PAUSE']];
+const COMBO_TIERS = [[25, 'LEGENDARY', '#ffe066'], [15, 'SHADOWSTORM', '#7fe8ff'], [10, 'BRUTAL', '#ff6a8a'], [5, 'SAVAGE', '#ffb347']];
+
+// Fight waves: each wave = list of spawns.
+//   ['wisp', 'R', y]      monster entering from the Right / Left / Top
+//   { conga: 'R', n: 6, type: 'wisp', y }   a marching line (wolf food)
+const ROOMS = [
+  { key: 'open', clock: 1380, name: 'THE BEDROOM', wall: 'wallA', type: 'fight', forms: ['hand'], par: 30,
+    waves: [
+      [['wisp', 'R', 330], ['wisp', 'R', 260], ['wisp', 'L', 300]],
+      [['wisp', 'L', 250], ['wisp', 'R', 380], ['wisp', 'R', 200], ['snuffer', 'T', 0], ['wisp', 'L', 360]],
+      [['brute', 'R', 0], ['wisp', 'R', 260], ['wisp', 'L', 300], ['wisp', 'L', 200]],
+    ] },
+  { key: 'wolf', clock: 1395, name: 'THE HALLWAY', wall: 'wallB', type: 'fight', unlock: 'wolf', forms: ['hand', 'wolf'], par: 25,
+    waves: [
+      [{ conga: 'R', n: 7, type: 'wisp', y: FLOOR - 40 }],
+      [{ conga: 'L', n: 5, type: 'wisp', y: FLOOR - 40 }, { conga: 'R', n: 1, type: 'brute', y: 0 }],
+      [{ conga: 'R', n: 6, type: 'wisp', y: FLOOR - 120 }, ['brute', 'L', 0], ['brute', 'R', 0], ['snuffer', 'T', 0]],
+    ] },
+  { key: 'wind', clock: 1405, name: 'THE STORM WINDOW', wall: 'wallA', type: 'wind', forms: ['hand', 'wolf'], par: 25 },
+  { key: 'raven', clock: 1415, name: 'THE LIBRARY', wall: 'wallC', type: 'fight', unlock: 'raven', forms: ['hand', 'wolf', 'raven'], par: 30,
+    waves: [
+      [['wisp', 'T', 0], ['wisp', 'T', 0], ['wisp', 'T', 0], ['wisp', 'L', 160], ['wisp', 'R', 140], ['wisp', 'R', 220], ['wisp', 'L', 240], ['wisp', 'T', 0]],
+      [['snuffer', 'T', 0], ['snuffer', 'L', 120], ['snuffer', 'R', 120], ['wisp', 'R', 300], ['wisp', 'L', 300], ['snuffer', 'T', 0], ['wisp', 'R', 200]],
+      [['brute', 'L', 0], ['brute', 'R', 0], { conga: 'R', n: 5, type: 'wisp', y: FLOOR - 40 }, ['wisp', 'T', 0], ['wisp', 'T', 0], ['snuffer', 'T', 0], ['wisp', 'L', 180], ['wisp', 'R', 180], ['snuffer', 'T', 0]],
+    ] },
+  { key: 'chase', clock: 1425, name: 'THE STAIRS', wall: 'wallB', type: 'chase', forms: ['hand', 'wolf', 'raven'], length: 2700, par: 22 },
+  { key: 'dark', clock: 1432, name: 'THE BASEMENT', wall: 'wallC', type: 'dark', forms: ['hand', 'wolf', 'raven'], length: 1500, matchX: 1060, par: 35 },
+  { key: 'boss', clock: 1439, name: 'THE ATTIC', wall: 'wallD', type: 'boss', forms: ['hand', 'wolf', 'raven'], par: 60 },
+];
+
+// ---------------- Audio (synth only) ----------------
+const AudioSys = (() => {
+  let ctx = null, master, sfx, mus, noiseBuf, muted = false, dest = null;
+  try { muted = localStorage.getItem('shade_muted') === '1'; } catch (e) {}
+  function ac() {
+    if (!ctx) {
+      try {
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+        master = ctx.createGain(); master.gain.value = muted ? 0 : 1; master.connect(ctx.destination);
+        sfx = ctx.createGain(); sfx.connect(master);
+        mus = ctx.createGain(); mus.gain.value = 0; mus.connect(master);
+        const len = ctx.sampleRate * 0.5;
+        noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      } catch (e) { ctx = null; }
+    }
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+  function tone(dest, f, d, type, v, to, t) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t);
+    if (to) o.frequency.exponentialRampToValueAtTime(to, t + d);
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(v, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.connect(g).connect(dest); o.start(t); o.stop(t + d + 0.05);
+  }
+  function noise(dest, d, v, t, freq = 5000, type = 'highpass') {
+    const s = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+    s.buffer = noiseBuf; f.type = type; f.frequency.value = freq;
+    g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    s.connect(f).connect(g).connect(dest); s.start(t); s.stop(t + d + 0.02);
+  }
+  return {
+    ac,
+    get muted() { return muted; },
+    toggleMute() {
+      muted = !muted;
+      try { localStorage.setItem('shade_muted', muted ? '1' : '0'); } catch (e) {}
+      if (ctx) master.gain.setTargetAtTime(muted ? 0 : 1, ctx.currentTime, 0.05);
+      if (window.syncMute) window.syncMute();
+    },
+    sfx(f, d, type = 'square', v = 0.08, to = null, delay = 0) { if (ac()) tone(sfx, f, d, type, v, to, ctx.currentTime + delay); },
+    sfxNoise(d, v, freq, type, delay = 0) { if (ac()) noise(sfx, d, v, ctx.currentTime + delay, freq, type); },
+    mus(f, d, type, v, t, to = null) { if (ctx) tone(mus, f, d, type, v, to, t); },
+    musNoise(d, v, t, freq, type) { if (ctx) noise(mus, d, v, t, freq, type); },
+    get bus() { return mus; },
+    stream() { if (!ac()) return null; if (!dest) { dest = ctx.createMediaStreamDestination(); master.connect(dest); } return dest.stream; },
+    get ctx() { return ctx; },
+  };
+})();
+
+const Sfx = {
+  smash:   () => { AudioSys.sfx(90, 0.25, 'sine', 0.22, 40); AudioSys.sfxNoise(0.18, 0.12, 800, 'lowpass'); },
+  swoosh:  () => AudioSys.sfxNoise(0.12, 0.05, 1500, 'bandpass'),
+  poof:    () => { AudioSys.sfx(700, 0.3, 'sine', 0.06, 90); AudioSys.sfxNoise(0.25, 0.05, 3000); },
+  hiss:    () => AudioSys.sfxNoise(0.2, 0.03, 4000),
+  spawn:   () => AudioSys.sfx(140, 0.5, 'sawtooth', 0.035, 70),
+  whimper: () => { AudioSys.sfx(700, 0.18, 'sine', 0.07, 520); AudioSys.sfx(560, 0.3, 'sine', 0.06, 380, 0.17); },
+  candle:  () => [523, 659, 784, 1046].forEach((f, i) => AudioSys.sfx(f, 0.4, 'triangle', 0.06, null, i * 0.07)),
+  blip:    () => AudioSys.sfx(880, 0.05, 'square', 0.04),
+  type:    () => AudioSys.sfx(1200, 0.025, 'square', 0.02),
+  fail:    () => AudioSys.sfx(300, 0.8, 'sawtooth', 0.06, 60),
+  win:     () => [392, 494, 587, 784, 988].forEach((f, i) => AudioSys.sfx(f, 0.7, 'triangle', 0.06, null, i * 0.12)),
+  step:    () => AudioSys.sfxNoise(0.04, 0.015, 600, 'lowpass'),
+  heart:   () => { AudioSys.sfx(58, 0.12, 'sine', 0.22, 42); AudioSys.sfx(52, 0.14, 'sine', 0.16, 38, 0.17); },
+  grab:    () => { AudioSys.sfx(220, 0.1, 'square', 0.05, 440); AudioSys.sfxNoise(0.08, 0.04, 2000, 'bandpass'); },
+  throwIt: () => AudioSys.sfxNoise(0.22, 0.09, 1200, 'bandpass'),
+  thud:    () => { AudioSys.sfx(70, 0.2, 'sine', 0.2, 35); AudioSys.sfxNoise(0.1, 0.08, 500, 'lowpass'); },
+  boom:    () => { AudioSys.sfx(110, 0.5, 'sine', 0.28, 30); AudioSys.sfxNoise(0.45, 0.16, 900, 'lowpass'); AudioSys.sfx(880, 0.25, 'square', 0.04, 220); },
+  combo:   (n) => AudioSys.sfx(440 * Math.pow(2, Math.min(n, 12) / 12), 0.15, 'triangle', 0.07),
+  snuff:   () => { AudioSys.sfxNoise(0.35, 0.1, 3000); AudioSys.sfx(600, 0.3, 'sine', 0.05, 200); },
+  grow:    () => AudioSys.sfx(80, 0.35, 'sawtooth', 0.06, 160),
+  slam:    () => { AudioSys.sfx(60, 0.5, 'sine', 0.3, 28); AudioSys.sfxNoise(0.4, 0.2, 600, 'lowpass'); },
+  impact:  () => { AudioSys.sfx(55, 0.6, 'sine', 0.3, 30); AudioSys.sfxNoise(0.5, 0.18, 1500, 'lowpass'); AudioSys.sfx(220, 0.4, 'sawtooth', 0.06, 55); },
+  clash:   () => { AudioSys.sfx(1800, 0.4, 'square', 0.06, 600); AudioSys.sfx(90, 0.5, 'sine', 0.25, 40); AudioSys.sfxNoise(0.3, 0.12, 4000); },
+  roar:    () => { AudioSys.sfx(90, 1.2, 'sawtooth', 0.09, 35); AudioSys.sfx(135, 1.2, 'square', 0.04, 50); AudioSys.sfxNoise(1, 0.08, 400, 'lowpass'); },
+  wind:    () => { for (let i = 0; i < 4; i++) AudioSys.sfxNoise(0.6, 0.06, 700 + i * 300, 'bandpass', i * 0.15); },
+  scratch: () => { AudioSys.sfxNoise(0.12, 0.12, 3500, 'bandpass'); },
+  ignite:  () => { AudioSys.sfxNoise(0.4, 0.1, 1200, 'lowpass'); AudioSys.sfx(300, 0.5, 'triangle', 0.08, 900); },
+  scare:   () => { AudioSys.sfxNoise(0.5, 0.25, 2500, 'bandpass'); AudioSys.sfx(740, 0.5, 'sawtooth', 0.08, 700); AudioSys.sfx(784, 0.5, 'sawtooth', 0.08, 760); },
+  rage:    () => { AudioSys.sfx(55, 1.5, 'sawtooth', 0.12, 110); AudioSys.sfx(82, 1.5, 'square', 0.06, 165); [262, 330, 392, 523].forEach((f, i) => AudioSys.sfx(f, 1.2, 'triangle', 0.05, null, 0.3 + i * 0.06)); },
+  card:    () => { AudioSys.sfx(65, 0.7, 'sine', 0.3, 32); AudioSys.sfxNoise(0.35, 0.14, 1800, 'lowpass'); AudioSys.sfx(1046, 0.4, 'triangle', 0.04, null, 0.05); },
+  slow:    () => { AudioSys.sfx(300, 0.8, 'sine', 0.08, 80); AudioSys.sfxNoise(0.6, 0.05, 400, 'lowpass'); },
+  form:    () => { AudioSys.sfx(500, 0.15, 'triangle', 0.06, 1000); AudioSys.sfxNoise(0.1, 0.04, 2500, 'bandpass'); },
+  wolf:    () => { AudioSys.sfx(220, 0.25, 'sawtooth', 0.07, 520); AudioSys.sfx(520, 0.35, 'sawtooth', 0.04, 300, 0.12); AudioSys.sfxNoise(0.25, 0.1, 1000, 'bandpass'); },
+  ravens:  () => { for (let i = 0; i < 5; i++) AudioSys.sfx(900 + Math.random() * 500, 0.08, 'square', 0.03, 600, i * 0.05); AudioSys.sfxNoise(0.3, 0.06, 3000, 'bandpass'); },
+  tier:    () => [523, 784, 1046].forEach((f, i) => AudioSys.sfx(f, 0.25, 'square', 0.04, null, i * 0.06)),
+  windup:  () => { AudioSys.sfxNoise(1.0, 0.04, 600, 'bandpass'); AudioSys.sfx(200, 1.0, 'sine', 0.03, 500); },
+  tick:    () => AudioSys.sfx(2400, 0.03, 'square', 0.035),
+  timestop: () => { AudioSys.sfx(1800, 0.6, 'sine', 0.08, 300); AudioSys.sfx(900, 0.8, 'triangle', 0.06, 120, 0.05); AudioSys.sfxNoise(0.5, 0.06, 2500, 'bandpass'); },
+  timego:  () => { AudioSys.sfx(300, 0.4, 'sine', 0.06, 1500); },
+  golden:  () => [784, 988, 1175, 1568, 1976].forEach((f, i) => AudioSys.sfx(f, 0.3, 'triangle', 0.06, null, i * 0.05)),
+  ember:   () => AudioSys.sfx(1400 + Math.random() * 500, 0.08, 'sine', 0.035),
+  close:   () => { AudioSys.sfx(220, 0.6, 'sine', 0.1, 880); AudioSys.sfx(330, 0.6, 'triangle', 0.05, 1320, 0.05); },
+  thunder: () => { AudioSys.sfxNoise(1.6, 0.16, 180, 'lowpass'); AudioSys.sfx(45, 1.4, 'sine', 0.12, 30, 0.1); },
+  best:    () => [523, 659, 784, 1046, 1318].forEach((f, i) => AudioSys.sfx(f, 0.35, 'square', 0.035, null, i * 0.07)),
+  door:    () => { AudioSys.sfx(90, 0.3, 'square', 0.08, 50); AudioSys.sfxNoise(0.25, 0.1, 400, 'lowpass'); },
+};
+
+// ---------------- Music: a haunted synth score ----------------
+// Music box lullabies, ghost-choir pads, bells, whispers and heartbeats,
+// all through a big reverb so it sounds like an empty old house at night.
+const Music = (() => {
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+  let cur = null, step = 0, next = 0, timer = null, fx = null, songT0 = 0, intensity = 0;
+
+  // reverb + echo, built once on the music bus
+  function ensureFx() {
+    const ctx = AudioSys.ctx; if (!ctx || fx) return fx;
+    const bus = AudioSys.bus;
+    const len = Math.floor(ctx.sampleRate * 3.2), ir = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) { const d = ir.getChannelData(ch); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6); }
+    const rev = ctx.createConvolver(); rev.buffer = ir;
+    const wet = ctx.createGain(); wet.gain.value = 0.55; rev.connect(wet).connect(bus);
+    const send = ctx.createGain(); send.gain.value = 1; send.connect(rev);
+    const echo = ctx.createDelay(1.5); echo.delayTime.value = 0.42;
+    const fb = ctx.createGain(); fb.gain.value = 0.38;
+    const echoOut = ctx.createGain(); echoOut.gain.value = 0.5;
+    echo.connect(fb).connect(echo); echo.connect(echoOut); echoOut.connect(bus); echoOut.connect(send);
+    fx = { ctx, bus, send, echo };
+    return fx;
+  }
+  // one voice: oscillator -> (filter) -> envelope -> dry bus + reverb send (+ echo)
+  function voice(t, f, dur, { type = 'sine', vol = 0.05, attack = 0.01, release = null, detune = 0, cutoff = 0, rev = 0.5, echo = 0, vib = 0, to = null } = {}) {
+    const F = ensureFx(); if (!F) return;
+    const { ctx, bus } = F;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t); o.detune.value = detune;
+    if (to) o.frequency.exponentialRampToValueAtTime(to, t + dur);
+    if (vib) { const l = ctx.createOscillator(), lg = ctx.createGain(); l.frequency.value = 5.2; lg.gain.value = vib; l.connect(lg).connect(o.frequency); l.start(t); l.stop(t + dur + 0.1); }
+    let node = o;
+    if (cutoff) { const flt = ctx.createBiquadFilter(); flt.type = 'lowpass'; flt.frequency.value = cutoff; flt.Q.value = 0.7; o.connect(flt); node = flt; }
+    const rel = release == null ? dur : release;
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + attack);
+    g.gain.setValueAtTime(vol, t + Math.max(attack, dur - rel));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    node.connect(g); g.connect(bus);
+    if (rev) { const s = ctx.createGain(); s.gain.value = rev; g.connect(s).connect(F.send); }
+    if (echo) { const e = ctx.createGain(); e.gain.value = echo; g.connect(e).connect(F.echo); }
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+  function noiseV(t, dur, { vol = 0.02, freq = 1200, q = 4, sweep = 0, rev = 0.8 } = {}) {
+    const F = ensureFx(); if (!F) return;
+    const { ctx, bus } = F;
+    const len = Math.floor(ctx.sampleRate * dur), buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const s = ctx.createBufferSource(), flt = ctx.createBiquadFilter(), g = ctx.createGain();
+    s.buffer = buf; flt.type = 'bandpass'; flt.frequency.setValueAtTime(freq, t); flt.Q.value = q;
+    if (sweep) flt.frequency.exponentialRampToValueAtTime(freq * sweep, t + dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + dur * 0.4); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(flt).connect(g); g.connect(bus);
+    const r = ctx.createGain(); r.gain.value = rev; g.connect(r).connect(F.send);
+    s.start(t); s.stop(t + dur);
+  }
+  // instruments
+  const box = (t, n, v = 0.045) => { voice(t, mtof(n), 1.6, { vol: v, attack: 0.004, release: 1.5, rev: 0.6, echo: 0.5, detune: (Math.random() - 0.5) * 18 }); voice(t, mtof(n + 12), 0.9, { vol: v * 0.3, attack: 0.003, release: 0.85, rev: 0.6, echo: 0.4 }); };
+  const choir = (t, notes, dur, v = 0.012) => notes.forEach(n => [-9, 0, 9].forEach(dt => voice(t, mtof(n), dur, { type: 'sawtooth', vol: v, attack: dur * 0.35, release: dur * 0.45, detune: dt, cutoff: 900, rev: 0.9, vib: 2.5 })));
+  const drone = (t, n, dur, v = 0.035) => { voice(t, mtof(n), dur, { vol: v, attack: 1.2, release: 1.5, rev: 0.7 }); voice(t, mtof(n - 12), dur, { type: 'triangle', vol: v * 0.8, attack: 1.2, release: 1.5, rev: 0.5 }); };
+  const bell = (t, n, v = 0.05) => [1, 2.76, 5.4, 8.93].forEach((p, i) => voice(t, mtof(n) * p, 3.5 - i * 0.6, { vol: v / (i + 1), attack: 0.003, release: 3 - i * 0.5, rev: 0.9 }));
+  const kick = (t, v = 0.22) => voice(t, 110, 0.35, { vol: v, attack: 0.002, release: 0.33, to: 38, rev: 0.25 });
+  const tom = (t, f = 140, v = 0.14) => voice(t, f, 0.3, { vol: v, attack: 0.002, release: 0.28, to: f * 0.55, rev: 0.4 });
+  const heart = (t, v = 0.2) => { kick(t, v); kick(t + 0.18, v * 0.7); };
+  const whisper = (t) => noiseV(t, 1.4 + Math.random(), { vol: 0.018, freq: 800 + Math.random() * 1500, q: 6, sweep: 0.5 + Math.random(), rev: 1 });
+  const swell = (t, n, dur) => voice(t, mtof(n), dur, { type: 'sawtooth', vol: 0.02, attack: dur * 0.9, release: dur * 0.1, cutoff: 700, rev: 1, vib: 4 });
+
+  // A harmonic minor lullaby (step -> midi), 64 steps = 4 bars
+  const LULLABY = { 0: 69, 4: 72, 8: 76, 12: 74, 16: 72, 20: 71, 24: 68, 28: 64, 32: 69, 36: 72, 40: 76, 44: 77, 48: 76, 52: 74, 56: 71, 60: 68 };
+  const DAWN = { 0: 72, 4: 76, 8: 79, 12: 77, 16: 76, 20: 74, 24: 72, 28: 67, 32: 69, 36: 72, 40: 76, 44: 77, 48: 79, 52: 76, 56: 74, 60: 72 };
+  const BOSS_LEAD = { 0: 69, 6: 70, 8: 69, 12: 64, 16: 65, 22: 64, 24: 63, 28: 64, 32: 69, 38: 72, 40: 71, 44: 70, 48: 69, 54: 68, 56: 69 };
+  const SONGS = {
+    title: { bpm: 60, chords: [[57, 60, 64], [56, 59, 64], [57, 60, 64], [53, 57, 60]] },
+    level: { bpm: 72, chords: [[57, 60, 64], [53, 57, 60], [50, 53, 57], [52, 56, 59]] },
+    dark:  { bpm: 50, chords: [[45, 46], [44, 45]] },
+    chase: { bpm: 150, chords: [[57, 60, 64], [57, 60, 63], [53, 57, 60], [52, 56, 59]] },
+    boss:  { bpm: 128, chords: [[45, 52, 57], [41, 48, 53], [43, 50, 55], [40, 47, 52]] },
+    dawn:  { bpm: 66, chords: [[60, 64, 67], [57, 60, 64], [53, 57, 60], [55, 59, 62]] },
+  };
+  function sched(name, s, t) {
+    const S = SONGS[name], spb = 60 / S.bpm, st = spb / 4;
+    const bar = Math.floor(s / 16), k = s % 16, ch = S.chords[bar % S.chords.length], k64 = s % 64;
+    if (name === 'title' || name === 'dawn') {
+      const mel = name === 'title' ? LULLABY : DAWN;
+      if (mel[k64] !== undefined) box(t, mel[k64], name === 'dawn' ? 0.07 : 0.065);
+      if (k === 0) { choir(t, ch, st * 16, 0.008); drone(t, ch[0] - 12, st * 16, 0.025); }
+      if (k64 === 0 && name === 'title') bell(t, 57, 0.035);
+      if (name === 'title' && k === 8 && bar % 4 === 2) whisper(t);
+    } else if (name === 'level') {
+      if (k === 0) { choir(t, ch, st * 16, 0.009); drone(t, ch[0] - 12, st * 16, 0.03); }
+      if (k % 4 === 2) box(t, ch[(k / 4 | 0) % 3] + 12, 0.03);
+      if (k === 0 || k === 8) heart(t, 0.13);
+      if (k64 === 40) whisper(t);
+      if (bar % 8 === 7 && k === 0) bell(t, 69, 0.03);
+      if (intensity >= 1 && k % 4 === 0) kick(t, 0.12);                                  // combo layers
+      if (intensity >= 1 && k % 2 === 1) noiseV(t, 0.06, { vol: 0.014, freq: 6500, q: 1, rev: 0.1 });
+      if (intensity >= 2 && k % 2 === 0) box(t, ch[(k / 2 | 0) % 3] + 24, 0.022);
+    } else if (name === 'dark') {
+      if (k === 0 && bar % 2 === 0) { drone(t, ch[0], st * 32, 0.04); drone(t, ch[1], st * 32, 0.02); swell(t, ch[0] + 24 + 1, st * 30); }
+      if (k === 0 || k === 8) heart(t, 0.18);
+      if (k === 4 && Math.random() < 0.5) whisper(t);
+      if (k === 12 && Math.random() < 0.35) box(t, [81, 82, 76, 75][Math.random() * 4 | 0], 0.025);
+    } else if (name === 'chase') {
+      if (k % 4 === 0) kick(t, 0.2);
+      if (k % 2 === 1) tom(t, k % 4 === 1 ? 160 : 120, 0.09);
+      voice(t, mtof(ch[0] - 24 + (k % 4 === 2 ? 6 : 0)), st * 0.9, { type: 'sawtooth', vol: 0.03, attack: 0.005, release: st * 0.8, cutoff: 1200, rev: 0.3 });   // tritone riff
+      if (k === 0) choir(t, ch, st * 6, 0.012);
+      if (k % 4 === 0) box(t, ch[(k / 4 | 0) % 3] + 24, 0.025);
+      if (k64 === 0) bell(t, 57, 0.03);
+      if (intensity >= 2 && k % 2 === 0) tom(t, 210, 0.05);
+    } else if (name === 'boss') {
+      if (k === 0) { choir(t, ch, st * 16, 0.014); bell(t, ch[0] + 12, 0.045); }
+      if (k === 0 || k === 6 || k === 10) kick(t, 0.24);
+      if (k === 4 || k === 12) tom(t, 110, 0.14);
+      if (k === 14) tom(t, 150, 0.1);
+      if (BOSS_LEAD[k64] !== undefined) voice(t, mtof(BOSS_LEAD[k64]), st * 5, { type: 'triangle', vol: 0.04, attack: 0.02, release: st * 4, rev: 0.6, vib: 3, echo: 0.25 });
+      if (k % 2 === 0) voice(t, mtof(ch[0] - 12), st * 1.6, { type: 'sawtooth', vol: 0.02, attack: 0.005, release: st * 1.4, cutoff: 600, rev: 0.2 });
+    }
+  }
+  function fadeTo(v, time) {
+    const a = AudioSys.ctx, b = AudioSys.bus; if (!a) return;
+    b.gain.cancelScheduledValues(a.currentTime); b.gain.setValueAtTime(b.gain.value, a.currentTime);
+    b.gain.linearRampToValueAtTime(v, a.currentTime + time);
+  }
+  return {
+    play(name) {
+      const a = AudioSys.ac(); if (!a || cur === name) return;
+      ensureFx();
+      if (!timer) timer = setInterval(() => {
+        const c = AudioSys.ctx; if (!c || !cur) return;
+        const st = 60 / SONGS[cur].bpm / 4;
+        if (next < c.currentTime) next = c.currentTime + 0.05;
+        while (next < c.currentTime + 0.2) { sched(cur, step, next); next += st; step++; }
+      }, 30);
+      const start = () => { cur = name; step = 0; next = a.currentTime + 0.05; songT0 = next; fadeTo(0.9, 1.0); };
+      if (cur) { fadeTo(0, 0.4); cur = null; setTimeout(start, 430); } else start();
+    },
+    stop() { fadeTo(0, 0.8); setTimeout(() => { cur = null; }, 820); },
+    // 1 right on each beat, decaying to 0 before the next: visuals pulse with the music
+    pulse() { const c = AudioSys.ctx; if (!c || !cur || AudioSys.muted) return 0; const ph = ((c.currentTime - songT0) * SONGS[cur].bpm / 60) % 1; return ph < 0 ? 0 : Math.pow(1 - ph, 4); },
+    setIntensity(n) { intensity = n; },
+  };
+})();
+
+// ---------------- helpers ----------------
+function addText(scene, x, y, str, size, color, extra = {}) {
+  return scene.add.text(x, y, str, Object.assign({ fontFamily: FONT, fontSize: size, color }, extra));
+}
+const NULL_G = { fillStyle() {}, fillRect() {}, fillPoints() {}, fillCircle() {}, fillTriangle() {}, lineStyle() {}, strokeCircle() {} };
+
+// Milo, drawn with shapes so he animates smoothly. (x, y) = feet on the floor.
+function drawKid(g, x, y, o) {
+  const walk = o.walk || 0, moving = !!o.moving;
+  const sw = moving ? Math.sin(walk) * (o.run ? 7 : 4.5) : 0;
+  const bob = moving ? Math.abs(Math.cos(walk)) * 2 : Math.sin((o.time || 0) * 0.003) * 0.6;
+  const by = y - bob, f = o.face || 1;
+  const shake = o.scared ? (Math.random() - 0.5) * 1.6 : 0;
+  // legs
+  g.fillStyle(0x4a6ab0); g.fillRoundedRect(x - 7 + sw * 0.6, by - 19, 6, 17, 2); g.fillRoundedRect(x + 1 - sw * 0.6, by - 19, 6, 17, 2);
+  g.fillStyle(0xf2c9a0); g.fillRect(x - 7 + sw * 0.6, by - 4, 7, 3); g.fillRect(x + 1 - sw * 0.6, by - 4, 7, 3);
+  // back arm
+  g.fillStyle(0x5677c0); g.fillRoundedRect(x - 13 * f - (f < 0 ? 5 : 0), by - 36 - sw * 0.4, 5, 14, 2);
+  // pajama top with little stars
+  g.fillStyle(0x6a8fd8); g.fillRoundedRect(x - 10, by - 39, 20, 23, 6);
+  g.fillStyle(0xd8e4ff); g.fillCircle(x - 5, by - 32, 1.5); g.fillCircle(x + 4, by - 27, 1.5); g.fillCircle(x - 2, by - 21, 1.5);
+  // head
+  const hx = x + shake + f, hy = by - 51;
+  g.fillStyle(0xf2c9a0); g.fillCircle(hx, hy, 12.5);
+  // messy hair
+  g.fillStyle(0x3b2a22);
+  g.fillEllipse(hx - f, hy - 8, 27, 14);
+  g.fillTriangle(hx - 12, hy - 6, hx - 7, hy - 9, hx - 13, hy + 2);
+  g.fillTriangle(hx - 4, hy - 14, hx + 2, hy - 13, hx - 2, hy - 20);
+  g.fillTriangle(hx + 4, hy - 13, hx + 10, hy - 10, hx + 9, hy - 18);
+  g.fillTriangle(hx + 11, hy - 7, hx + 13, hy + 1, hx + 8, hy - 9);
+  // eyes
+  const ex = f * 2;
+  if (o.blink) { g.fillStyle(0x15121f); g.fillRect(hx - 7 + ex, hy + 1, 5, 2); g.fillRect(hx + 2 + ex, hy + 1, 5, 2); }
+  else {
+    const eh = o.scared ? 9 : 8;
+    g.fillStyle(0xffffff); g.fillEllipse(hx - 4.5 + ex, hy + 1, 7, eh); g.fillEllipse(hx + 4.5 + ex, hy + 1, 7, eh);
+    g.fillStyle(0x2a1a14); g.fillEllipse(hx - 4 + ex * 1.4, hy + 2, 4, 5); g.fillEllipse(hx + 5 + ex * 1.4, hy + 2, 4, 5);
+    g.fillStyle(0xffffff); g.fillRect(hx - 4 + ex * 1.4, hy, 1.5, 1.5); g.fillRect(hx + 5 + ex * 1.4, hy, 1.5, 1.5);
+  }
+  if (o.scared || o.cry) { g.fillStyle(0x3b2a22); g.fillRect(hx - 8 + ex, hy - 6, 5, 1.5); g.fillRect(hx + 3 + ex, hy - 6, 5, 1.5); }
+  // mouth + tears
+  if (o.cry) {
+    g.fillStyle(0x8a4a3a); g.fillEllipse(hx + ex, hy + 8, 5, 3);
+    g.fillStyle(0x8fd8ff, 0.9); g.fillRect(hx - 6 + ex, hy + 5, 1.5, 4 + ((o.time || 0) / 60) % 4); g.fillRect(hx + 6 + ex, hy + 5, 1.5, 4 + ((o.time || 0) / 70) % 4);
+  } else if (o.scared) { g.fillStyle(0x8a4a3a); g.fillEllipse(hx + ex, hy + 8, 3.5, 4); }
+  else if (o.smile) { g.lineStyle(1.5, 0x8a4a3a); g.beginPath(); g.arc(hx + ex, hy + 5, 3.5, 0.3, Math.PI - 0.3); g.strokePath(); }
+  else { g.fillStyle(0x8a4a3a); g.fillRect(hx - 1.5 + ex, hy + 7, 3, 1.5); }
+  g.fillStyle(0xff9a9a, 0.4); g.fillEllipse(hx - 8 + ex, hy + 5, 4, 2.5); g.fillEllipse(hx + 8 + ex, hy + 5, 4, 2.5);
+  // front arm reaching to the candle
+  if (o.hand) {
+    const sx = x + 8 * f, sy = by - 35;
+    g.lineStyle(5, 0x6a8fd8); g.lineBetween(sx, sy, o.hand.x, o.hand.y + 6);
+    g.fillStyle(0xf2c9a0); g.fillCircle(o.hand.x, o.hand.y + 7, 3);
+  }
+  // the candle
+  if (o.candle) {
+    const c = o.candle;
+    g.fillStyle(0xf4ead0); g.fillRect(c.x - 2.5, c.y, 5, 13);
+    g.fillStyle(0xffffff, 0.8); g.fillRect(c.x - 2.5, c.y, 1.5, 13);
+    g.fillStyle(0x2a2018); g.fillRect(c.x - 0.5, c.y - 2, 1, 2);
+    if (c.lit) {
+      const fl = Math.sin((o.time || 0) * 0.03) * 1.2;
+      g.fillStyle(0xff8a2a, 0.9); g.fillEllipse(c.x, c.y - 6, 6, 11 + fl);
+      g.fillStyle(0xfff0b0, 1); g.fillEllipse(c.x, c.y - 5, 3, 6 + fl * 0.5);
+    }
+  }
+}
+
+// The kid's giant silhouette on the wall. lean > 0 leans right.
+function drawShadowBody(g, bx, S, time, walk, alpha, lean = -0.1, color = 0x05030c, rim = 0) {
+  const X = (x, y) => bx + x + (FLOOR - y) * lean;
+  const sway = Math.sin(time * 0.0016) * S * 0.25;
+  const parts = (grow, a) => {
+    g.fillStyle(color, a);
+    const st = Math.sin(walk) * S * 1.6;
+    g.fillRect(X(-3.4 * S + st - grow * 0.2, FLOOR), FLOOR - 8 * S, 2.8 * S + grow * 0.4, 8 * S);
+    g.fillRect(X(0.8 * S - st - grow * 0.2, FLOOR), FLOOR - 8 * S, 2.8 * S + grow * 0.4, 8 * S);
+    g.fillPoints([
+      { x: X(-5 * S - grow * 0.3, FLOOR - 8 * S), y: FLOOR - 8 * S },
+      { x: X(5 * S + grow * 0.3, FLOOR - 8 * S), y: FLOOR - 8 * S },
+      { x: X(4 * S + grow * 0.3 + sway, FLOOR - 17 * S), y: FLOOR - 17.5 * S - grow * 0.3 },
+      { x: X(-4 * S - grow * 0.3 + sway, FLOOR - 17 * S), y: FLOOR - 17.5 * S - grow * 0.3 },
+    ], true);
+    const hx = X(sway, FLOOR - 22.5 * S), hy = FLOOR - 22.5 * S;
+    g.fillCircle(hx, hy, 5.6 * S + grow * 0.3);
+    g.fillTriangle(hx - 4 * S, hy - 3 * S, hx - 1 * S, hy - 5 * S, hx - 3 * S, hy - 8.5 * S);
+    g.fillTriangle(hx, hy - 5 * S, hx + 3 * S, hy - 4 * S, hx + 1.5 * S, hy - 8 * S);
+    g.fillTriangle(hx + 3 * S, hy - 4 * S, hx + 5.5 * S, hy - 1.5 * S, hx + 6.5 * S, hy - 6 * S);
+    return { hx, hy };
+  };
+  if (rim) parts(S * 1.0, rim);
+  parts(S * 1.2, alpha * 0.25);
+  const head = parts(0, alpha);
+  return {
+    shoulder: { x: X(-4.2 * S + sway, FLOOR - 16 * S), y: FLOOR - 16 * S },
+    shoulderR: { x: X(4.2 * S + sway, FLOOR - 16 * S), y: FLOOR - 16 * S },
+    head: { x: head.hx, y: head.hy },
+    chest: { x: X(sway, FLOOR - 13 * S), y: FLOOR - 13 * S },
+  };
+}
+
+// A shadow claw hand at (x, y), pointing along ang.
+function drawClaw(g, x, y, r, ang, closed, alpha = 0.92, color = 0x05030c) {
+  g.fillStyle(color, alpha * 0.27); g.fillCircle(x, y, r * 1.4);
+  g.fillStyle(color, alpha);
+  if (closed) { g.fillCircle(x, y, r * 1.15); return; }
+  g.fillCircle(x, y, r * 0.8);
+  for (let f = -1.5; f <= 1.5; f += 1) {
+    const fa = ang + f * 0.32;
+    g.fillTriangle(x + Math.cos(fa + 1.4) * r * 0.28, y + Math.sin(fa + 1.4) * r * 0.28,
+      x + Math.cos(fa - 1.4) * r * 0.28, y + Math.sin(fa - 1.4) * r * 0.28,
+      x + Math.cos(fa) * r * 1.7, y + Math.sin(fa) * r * 1.7);
+  }
+  const ta = ang - 1.3;
+  g.fillTriangle(x, y, x + Math.cos(ta + 0.3) * r * 0.5, y + Math.sin(ta + 0.3) * r * 0.5, x + Math.cos(ta) * r * 1.2, y + Math.sin(ta) * r * 1.2);
+}
+
+function drawArm(g, sh, hd, S, alpha = 0.88, color = 0x05030c) {
+  const mx = (sh.x + hd.x) / 2 + (hd.y - sh.y) * 0.15, my = (sh.y + hd.y) / 2 - Math.abs(hd.x - sh.x) * 0.15;
+  for (const [a, wMul] of [[alpha * 0.25, 1.6], [alpha, 1]]) for (let i = 0; i <= 12; i++) {
+    const t = i / 12, u = 1 - t;
+    const px = u * u * sh.x + 2 * u * t * mx + t * t * hd.x, py = u * u * sh.y + 2 * u * t * my + t * t * hd.y;
+    g.fillStyle(color, a); g.fillCircle(px, py, (2.2 - 0.9 * t) * S * wMul);
+  }
+}
+
+// =====================================================================
+class Boot extends Phaser.Scene {
+  constructor() { super('Boot'); }
+  create() {
+    const canvas = (key, w, h, draw) => { const c = this.textures.createCanvas(key, w, h); draw(c.getContext()); c.refresh(); return c; };
+    canvas('glow', 256, 256, x => {
+      const g = x.createRadialGradient(128, 128, 0, 128, 128, 128);
+      g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.3, 'rgba(255,255,255,0.45)');
+      g.addColorStop(0.65, 'rgba(255,255,255,0.12)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+      x.fillStyle = g; x.fillRect(0, 0, 256, 256);
+    });
+    canvas('lightmask', 256, 256, x => {
+      const g = x.createRadialGradient(128, 128, 0, 128, 128, 128);
+      g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.45, 'rgba(255,255,255,0.8)');
+      g.addColorStop(0.8, 'rgba(255,255,255,0.25)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+      x.fillStyle = g; x.fillRect(0, 0, 256, 256);
+    });
+    canvas('spark', 16, 16, x => {
+      const g = x.createRadialGradient(8, 8, 0, 8, 8, 8);
+      g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+      x.fillStyle = g; x.fillRect(0, 0, 16, 16);
+    });
+    // four wall styles, one per chapter
+    const wall = (key, base, stripe, panel, mold, pattern) => canvas(key, 240, FLOOR - 40, x => {
+      const h = FLOOR - 40;
+      x.fillStyle = base; x.fillRect(0, 0, 240, h);
+      pattern(x, h, stripe);
+      x.fillStyle = panel; x.fillRect(0, h - 110, 240, 110);
+      x.fillStyle = mold; x.fillRect(0, h - 112, 240, 4);
+      x.strokeStyle = stripe; x.lineWidth = 2;
+      for (let i = 10; i < 240; i += 60) x.strokeRect(i, h - 96, 44, 80);
+    });
+    wall('wallA', '#1c1830', '#231d3b', '#15121f', '#2e2848', (x, h, c) => {
+      x.fillStyle = c; for (let i = 0; i < 240; i += 30) x.fillRect(i, 0, 14, h - 110);
+      x.fillStyle = 'rgba(255,255,255,0.03)'; for (let i = 7; i < 240; i += 30) for (let j = 12; j < h - 120; j += 26) { x.beginPath(); x.arc(i, j, 2, 0, 7); x.fill(); }
+    });
+    wall('wallB', '#2a1a1a', '#331f1f', '#1a1010', '#4a2a22', (x, h, c) => {
+      x.fillStyle = c; for (let j = 0; j < h - 110; j += 40) for (let i = (j / 40) % 2 ? 0 : 30; i < 240; i += 60) { x.beginPath(); x.moveTo(i + 15, j); x.lineTo(i + 30, j + 20); x.lineTo(i + 15, j + 40); x.lineTo(i, j + 20); x.fill(); }
+    });
+    wall('wallC', '#16191c', '#1d2125', '#101214', '#2a2e33', (x, h, c) => {
+      x.fillStyle = c; for (let j = 0; j < h - 110; j += 26) for (let i = (j / 26) % 2 ? 0 : 24; i < 240; i += 48) x.fillRect(i + 1, j + 1, 46, 24);
+      x.fillStyle = 'rgba(80,120,90,0.08)'; for (let i = 0; i < 30; i++) x.fillRect(Math.random() * 240, Math.random() * (h - 110), 3, 8 + Math.random() * 20);
+    });
+    wall('wallD', '#1a1420', '#241a2c', '#120e16', '#3a2a44', (x, h, c) => {
+      x.fillStyle = c; for (let i = 0; i < 240; i += 60) x.fillRect(i, 0, 16, h - 110);
+      x.fillStyle = 'rgba(0,0,0,0.25)'; x.fillRect(0, 0, 240, 30);
+    });
+    canvas('floor', 128, H - FLOOR, x => {
+      x.fillStyle = '#24170f'; x.fillRect(0, 0, 128, H - FLOOR);
+      x.fillStyle = '#3a2618'; x.fillRect(0, 0, 128, 3);
+      x.fillStyle = '#1b110b';
+      for (let j = 14; j < H - FLOOR; j += 14) x.fillRect(0, j, 128, 2);
+      for (let j = 0; j < H - FLOOR; j += 14) x.fillRect((j * 3) % 128, j, 2, 14);
+    });
+    canvas('vignette', W, H, x => {
+      const g = x.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.95);
+      g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.85)');
+      x.fillStyle = g; x.fillRect(0, 0, W, H);
+    });
+    this.scene.start('Title');
+  }
+}
+
+// A shadow wolf. (x, y) = body center, dir = +1 right / -1 left, s = size unit.
+function drawWolf(g, x, y, s, dir, t, alpha, color = 0x05030c) {
+  g.fillStyle(color, alpha);
+  g.fillEllipse(x, y, 64 * s, 26 * s);                                         // body
+  g.fillEllipse(x + dir * 22 * s, y - 6 * s, 30 * s, 24 * s);                  // chest
+  const hx = x + dir * 38 * s, hy = y - 14 * s;
+  g.fillCircle(hx, hy, 12 * s);                                                // head
+  g.fillTriangle(hx + dir * 6 * s, hy - 6 * s, hx + dir * 6 * s, hy + 6 * s, hx + dir * 26 * s, hy + 2 * s);   // snout
+  g.fillTriangle(hx - dir * 6 * s, hy - 8 * s, hx + dir * 2 * s, hy - 9 * s, hx - dir * 3 * s, hy - 24 * s);   // ears
+  g.fillTriangle(hx + dir * 2 * s, hy - 9 * s, hx + dir * 9 * s, hy - 6 * s, hx + dir * 6 * s, hy - 22 * s);
+  const run = Math.sin(t * 0.03) * 10 * s;
+  g.fillRect(x + dir * 16 * s + run, y + 6 * s, 5 * s, 18 * s); g.fillRect(x + dir * 8 * s - run, y + 6 * s, 5 * s, 18 * s);
+  g.fillRect(x - dir * 18 * s - run, y + 6 * s, 5 * s, 18 * s); g.fillRect(x - dir * 26 * s + run, y + 6 * s, 5 * s, 18 * s);
+  g.fillTriangle(x - dir * 28 * s, y - 6 * s, x - dir * 28 * s, y + 4 * s, x - dir * 58 * s, y - 16 * s);    // tail
+  return { eye: { x: hx + dir * 5 * s, y: hy - 3 * s } };
+}
+function drawRaven(g, x, y, s, t, dir, alpha, color = 0x05030c) {
+  const flap = Math.sin(t * 0.04) * 0.9;
+  g.fillStyle(color, alpha);
+  g.fillEllipse(x, y, 16 * s, 8 * s);
+  g.fillCircle(x + dir * 7 * s, y - 2 * s, 4 * s);
+  g.fillTriangle(x + dir * 10 * s, y - 3 * s, x + dir * 10 * s, y, x + dir * 16 * s, y - 1 * s);
+  g.fillTriangle(x - 2 * s, y, x + 4 * s, y, x - 4 * s, y - (12 + flap * 10) * s);
+  g.fillTriangle(x - 2 * s, y, x + 4 * s, y, x - 2 * s, y + (4 + flap * 6) * s);
+  g.fillTriangle(x - dir * 8 * s, y - 1 * s, x - dir * 8 * s, y + 2 * s, x - dir * 15 * s, y + 3 * s);
+}
+
+// =====================================================================
+class Title extends Phaser.Scene {
+  constructor() { super('Title'); }
+  create() {
+    this.cameras.main.setBackgroundColor('#04030a').fadeIn(400);
+    this.add.tileSprite(0, 40, W, FLOOR - 40, 'wallA').setOrigin(0).setAlpha(0.35);
+    this.add.tileSprite(0, FLOOR, W, H - FLOOR, 'floor').setOrigin(0).setAlpha(0.5);
+    const glow = this.add.image(W / 2 + 34, FLOOR - 60, 'glow').setBlendMode(ADD).setTint(0xff9a3c).setScale(2.6).setAlpha(0.6);
+    this.tweens.add({ targets: glow, scale: 2.75, duration: 140, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    this.shG = this.add.graphics(); this.kidG = this.add.graphics();
+    this.st = { s: 0 };
+    this.tweens.add({ targets: this.st, s: 1, duration: 1600, ease: 'Cubic.easeOut' });
+    const logo = addText(this, W / 2, 110, 'SHADE', 64, '#ffb347').setOrigin(0.5).setShadow(0, 0, '#ff5a1f', 24, true, true).setAlpha(0).setScale(2);
+    this.tweens.add({ targets: logo, alpha: 1, scale: 1, duration: 300, delay: 900, ease: 'Cubic.easeIn', onComplete: () => { Sfx.card(); this.cameras.main.shake(200, 0.01); } });
+    const tag = addText(this, W / 2, 180, 'YOU ARE HIS SHADOW.', 13, '#ffffff').setOrigin(0.5).setAlpha(0);
+    const start = addText(this, W / 2, 498, '▶ CLICK TO START', 13, '#ff8a3c').setOrigin(0.5).setAlpha(0);
+    const help = addText(this, W / 2, 524, 'ESC PAUSE   V RECORD TRAILER   C TEASER   T TRAILER MODE   1-7 ROOMS   M SOUND', 7, '#5a5280').setOrigin(0.5).setAlpha(0);
+    this.trailerTxt = addText(this, W - 16, 14, '', 8, '#7fe8ff').setOrigin(1, 0);
+    this.updTrailer();
+    this.tweens.add({ targets: [tag, help], alpha: 1, duration: 600, delay: 1400 });
+    this.tweens.add({ targets: start, alpha: { from: 0, to: 1 }, duration: 450, delay: 1600, yoyo: true, repeat: -1, hold: 350 });
+    this.add.image(0, 0, 'vignette').setOrigin(0);
+    // HOW TO PLAY: controls on the left, the goal on the right
+    const panel = this.add.graphics().setAlpha(0);
+    panel.fillStyle(0x0c0918, 0.82); panel.fillRoundedRect(26, 236, 330, 226, 10); panel.fillRoundedRect(W - 286, 236, 260, 150, 10);
+    panel.lineStyle(1, 0xffb347, 0.4); panel.strokeRoundedRect(26, 236, 330, 226, 10); panel.strokeRoundedRect(W - 286, 236, 260, 150, 10);
+    const howTo = [panel, addText(this, 42, 250, 'HOW TO PLAY', 10, '#ffb347')];
+    CONTROLS.forEach(([k, v], i) => {
+      howTo.push(addText(this, 42, 280 + i * 25, k, 8, '#ffd27a'));
+      howTo.push(addText(this, 340, 280 + i * 25, v, 8, '#e8e2ff').setOrigin(1, 0));
+    });
+    howTo.push(addText(this, W - 270, 250, 'YOUR GOAL', 10, '#ffb347'));
+    howTo.push(addText(this, W - 270, 278, 'PROTECT MILO.\n\nKEEP HIS CANDLE\nBURNING.\n\nSURVIVE UNTIL\nMIDNIGHT.', 8, '#e8e2ff', { lineSpacing: 5 }));
+    howTo.forEach(o => { o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 600, delay: 1500 }); });
+    this.registry.set('autoplay', false);
+    const go = (room = 0) => {
+      AudioSys.ac(); Sfx.blip();
+      if (this.going) return; this.going = true;
+      this.registry.set('score', 0); this.registry.set('best', 0); this.registry.set('rewinds', 0);
+      this.registry.set('t0', Date.now()); this.registry.set('ratings', []); this.registry.set('seen', {});
+      this.cameras.main.fadeOut(400, 0, 0, 0);
+      this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('Game', { room }));
+    };
+    this.input.on('pointerdown', () => go(0));
+    this.input.keyboard.on('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      AudioSys.ac();
+      if (k === 'm') AudioSys.toggleMute();
+      else if (k === 't') { this.registry.set('trailer', !this.registry.get('trailer')); this.updTrailer(); Sfx.blip(); }
+      else if (k === 'c') { Music.play('dark'); this.scene.start('Intro'); }
+      else if (k === 'v') { if (!this.going) { this.going = true; startTrailer(this); } }
+      else if (/^[1-7]$/.test(k)) go(+k - 1);
+      else go(0);
+    });
+    Music.play('title');
+    const bs = Best.get().score; if (bs) addText(this, W / 2, 204, 'BEST SCORE  ' + bs.toLocaleString('en-US'), 9, '#ffd27a').setOrigin(0.5).setAlpha(0.85);
+    const touchOnly = window.matchMedia && window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+    if (touchOnly) addText(this, W / 2, 230, 'BEST PLAYED ON A COMPUTER\nWITH A MOUSE AND KEYBOARD', 11, '#ff9ab0', { align: 'center', lineSpacing: 8 }).setOrigin(0.5).setShadow(0, 0, '#000', 6, true, true);
+  }
+  updTrailer() { this.trailerTxt.setText(this.registry.get('trailer') ? 'TRAILER MODE ON' : ''); }
+  update(time) {
+    const S = 1.5 + 6 * this.st.s, kx = W / 2 + 10;
+    this.shG.clear();
+    const pose = drawShadowBody(this.shG, kx - 8, S, time, 0, 0.9);
+    this.shG.fillStyle(0xc9a8ff, 0.8 * this.st.s); this.shG.fillEllipse(pose.head.x - 2.2 * S, pose.head.y + 0.3 * S, 1.3 * S, 0.6 * S); this.shG.fillEllipse(pose.head.x + 2.2 * S, pose.head.y + 0.3 * S, 1.3 * S, 0.6 * S);
+    this.kidG.clear(); drawKid(this.kidG, kx, FLOOR, { time, scared: true, hand: { x: kx + 15, y: FLOOR - 44 }, candle: { x: kx + 15, y: FLOOR - 44, lit: true } });
+  }
+}
+
+// =====================================================================
+class Game extends Phaser.Scene {
+  constructor() { super('Game'); }
+  init(d) { this.ri = d.room || 0; this.retry = !!d.retry; }
+
+  create() {
+    let R = ROOMS[this.ri];
+    this.auto = !!this.registry.get('autoplay');
+    if (this.auto) {        // trailer recording: a tighter highlight cut of every room
+      const cutWaves = { open: R.waves && R.waves.slice(1), wolf: R.waves && [R.waves[0], R.waves[2]], raven: R.waves && [R.waves[2]] };
+      R = Object.assign({}, R, { waves: cutWaves[R.key] || R.waves, length: R.key === 'chase' ? 1500 : R.key === 'dark' ? 1100 : R.length, matchX: R.key === 'dark' ? 660 : R.matchX });
+    }
+    this.R = R;
+    this.WORLD = R.length || W;
+    this.trailer = !!this.registry.get('trailer');
+    const cam = this.cameras.main;
+    cam.fadeIn(350, 0, 0, 0); cam.setBackgroundColor('#04030a'); cam.setBounds(0, 0, this.WORLD, H);
+    Music.play(R.type === 'boss' ? 'boss' : R.type === 'chase' ? 'chase' : R.type === 'dark' ? 'dark' : 'level');
+
+    // ---------- world ----------
+    this.add.rectangle(0, 0, this.WORLD, 40, 0x09070f).setOrigin(0).setDepth(0);
+    this.add.tileSprite(0, 40, this.WORLD, FLOOR - 40, R.wall).setOrigin(0).setDepth(0);
+    const deco = this.add.graphics().setDepth(0.5);
+    this.lights = [];
+    const windowAt = (x, y = 120, w = 90, h = 120) => {
+      deco.fillStyle(0x0f1a33); deco.fillRect(x, y, w, h);
+      deco.fillStyle(0x1d3058, 0.6); deco.fillRect(x + 6, y + 6, w / 2 - 9, h / 2 - 8); deco.fillRect(x + w / 2 + 3, y + 6, w / 2 - 9, h / 2 - 8);
+      deco.fillRect(x + 6, y + h / 2 + 4, w / 2 - 9, h / 2 - 10); deco.fillRect(x + w / 2 + 3, y + h / 2 + 4, w / 2 - 9, h / 2 - 10);
+      deco.lineStyle(4, 0x2a2440); deco.strokeRect(x, y, w, h);
+      this.lights.push({ x: x + w / 2, y: y + h / 2, r: 130, a: 0.35, win: true });
+    };
+    if (R.type === 'boss') {
+      deco.fillStyle(0x0f1a33); deco.fillCircle(W / 2 + 60, 150, 70);
+      deco.fillStyle(0x2a4070, 0.5); deco.fillCircle(W / 2 + 60, 150, 62);
+      deco.lineStyle(6, 0x2a2440); deco.strokeCircle(W / 2 + 60, 150, 70); deco.lineBetween(W / 2 - 10, 150, W / 2 + 130, 150); deco.lineBetween(W / 2 + 60, 80, W / 2 + 60, 220);
+      deco.fillStyle(0x1a1018); for (let x = 0; x < W; x += 160) deco.fillRect(x, 40, 20, 70);
+      this.lights.push({ x: W / 2 + 60, y: 150, r: 260, a: 0.4 });
+    } else if (R.type === 'wind') {
+      windowAt(40, 150, 110, 150); windowAt(W - 150, 150, 110, 150);
+      this.curtG = this.add.graphics().setDepth(0.6);
+    } else if (R.key === 'open') {
+      // a little bedroom: bed, toy shelf, a moonlit window
+      windowAt(620);
+      deco.fillStyle(0x2a2238); deco.fillRect(60, FLOOR - 70, 230, 70); deco.fillStyle(0x3a4a7a); deco.fillRect(60, FLOOR - 82, 230, 22);
+      deco.fillStyle(0xd8d0e8); deco.fillRect(70, FLOOR - 96, 60, 20);
+      deco.fillStyle(0x2a2032); deco.fillRect(780, 230, 120, 10); deco.fillRect(780, 300, 120, 10);
+      deco.fillStyle(0x6a4a3a); deco.fillRect(795, 205, 22, 25); deco.fillStyle(0x4a6a9a); deco.fillRect(830, 212, 18, 18); deco.fillStyle(0x9a4a4a); deco.fillCircle(875, 290, 10);
+    } else if (R.key === 'raven') {
+      for (let x = 30; x < W; x += 230) { deco.fillStyle(0x2a1c14); deco.fillRect(x, 100, 170, 260); deco.fillStyle(0x1a1008); for (let y = 130; y < 360; y += 56) deco.fillRect(x + 6, y, 158, 6);
+        for (let y = 106; y < 350; y += 56) for (let bx = x + 10; bx < x + 160; bx += 12) { deco.fillStyle([0x5a2a2a, 0x2a4a5a, 0x4a4a2a, 0x3a2a4a][(bx + y) % 4]); deco.fillRect(bx, y + (bx % 7), 9, 22 - (bx % 7)); } }
+    } else {
+      for (let x = 300; x < this.WORLD - 200; x += 520) {
+        windowAt(x);
+        deco.fillStyle(0x2a2032); deco.fillRect(x + 250, 150, 60, 44); deco.fillStyle(0x3a2c3a); deco.fillRect(x + 255, 155, 50, 34);
+      }
+    }
+    this.doorX = this.WORLD - 120;
+    if (R.type === 'chase' || R.type === 'dark') {
+      deco.fillStyle(0x2a1c14); deco.fillRect(this.doorX, FLOOR - 150, 80, 150);
+      deco.lineStyle(4, 0x4a3020); deco.strokeRect(this.doorX, FLOOR - 150, 80, 150);
+      deco.fillStyle(0xd8a040); deco.fillCircle(this.doorX + 66, FLOOR - 72, 4);
+      this.lights.push({ x: this.doorX + 40, y: FLOOR - 75, r: 110, a: 0.5 });
+    }
+    this.matchLight = null;
+    if (R.matchX) {
+      this.matchG = this.add.graphics().setDepth(5);
+      this.matchG.fillStyle(0x8a2a1a); this.matchG.fillRect(R.matchX - 10, FLOOR - 8, 20, 8);
+      this.matchG.fillStyle(0xe8d8a0); this.matchG.fillRect(R.matchX - 8, FLOOR - 7, 16, 2);
+      this.matchLight = { x: R.matchX, y: FLOOR - 10, r: 80, a: 0.9, flick: true }; this.lights.push(this.matchLight);
+    }
+
+    // ---------- layers ----------
+    this.glowBig = this.add.image(0, 0, 'glow').setBlendMode(ADD).setTint(0xff8a2a).setDepth(1);
+    this.glowCore = this.add.image(0, 0, 'glow').setBlendMode(ADD).setTint(0xffd27a).setDepth(1);
+    this.lightRing = this.add.graphics().setDepth(1.5);
+    this.splatG = this.add.graphics().setDepth(1.6);
+    this.wallDark = this.add.renderTexture(0, 0, W, H).setOrigin(0).setScrollFactor(0).setDepth(1.9);
+    this.maskImg = this.make.image({ key: 'lightmask', add: false }).setOrigin(0.5);
+    this.shadowG = this.add.graphics().setDepth(2);
+    this.hollowG = this.add.graphics().setDepth(2.2);
+    this.monG = this.add.graphics().setDepth(3);
+    this.add.tileSprite(0, FLOOR, this.WORLD, H - FLOOR, 'floor').setOrigin(0).setDepth(4);
+    this.chaseG = this.add.graphics().setDepth(4.6);
+    this.kidG = this.add.graphics().setDepth(5);
+    this.flame = this.add.particles(0, 0, 'spark', {
+      speed: { min: 5, max: 22 }, angle: { min: 250, max: 290 }, scale: { start: 0.5, end: 0 },
+      alpha: { start: 1, end: 0 }, lifespan: { min: 250, max: 550 }, frequency: 28,
+      tint: [0xfff0a0, 0xffa040, 0xff5a1a], blendMode: ADD, gravityY: -60,
+    }).setDepth(5.2);
+    this.fullDark = this.add.renderTexture(0, 0, W, H).setOrigin(0).setScrollFactor(0).setDepth(6.8);
+    this.eyeG = this.add.graphics().setDepth(6.9);
+    this.fxG = this.add.graphics().setDepth(7.1);
+    const burst = (tint, extra = {}) => this.add.particles(0, 0, 'spark', Object.assign({
+      speed: { min: 60, max: 300 }, angle: { min: 0, max: 360 }, scale: { start: 1.2, end: 0 },
+      lifespan: { min: 300, max: 800 }, tint, blendMode: ADD, emitting: false,
+    }, extra)).setDepth(7);
+    this.poofFx = burst([0x8a5cff, 0xc9a8ff, 0x3a1a6a]);
+    this.boomFx = burst([0xffffff, 0xc9a8ff, 0x8a5cff], { speed: { min: 150, max: 520 }, scale: { start: 1.6, end: 0 } });
+    this.fireFx = burst([0xfff0a0, 0xffa040, 0xff5a1a]);
+    this.blueFx = burst([0x9fe8ff, 0xffffff]);
+    this.goldFx = burst([0xffd27a, 0xc9a8ff, 0xffffff], { speed: { min: 200, max: 700 }, lifespan: { min: 600, max: 1400 }, scale: { start: 2, end: 0 } });
+    this.featherFx = burst([0x7fe8ff, 0x2a4a6a, 0xffffff], { speed: { min: 40, max: 160 }, scale: { start: 0.8, end: 0 }, gravityY: 120 });
+    this.windFx = this.add.particles(0, 0, 'spark', { speedX: { min: 700, max: 1100 }, speedY: { min: -40, max: 40 }, lifespan: 1200, scale: { start: 0.5, end: 0.2 }, alpha: { start: 0.5, end: 0 }, tint: 0xd8e8ff, emitting: false, blendMode: ADD }).setDepth(6.95);
+    this.smokeFx = this.add.particles(0, 0, 'spark', {
+      speed: { min: 10, max: 60 }, angle: { min: 0, max: 360 }, scale: { start: 1.6, end: 0 }, alpha: { start: 0.6, end: 0 },
+      lifespan: 700, tint: 0x05030c, emitting: false,
+    }).setDepth(2.5);
+    this.add.particles(0, 0, 'spark', {
+      x: { min: 0, max: this.WORLD }, y: { min: 60, max: FLOOR }, speedX: { min: -6, max: 6 }, speedY: { min: -8, max: 4 },
+      lifespan: 6000, frequency: 160, scale: { start: 0.25, end: 0 }, alpha: { start: 0.35, end: 0 }, tint: 0xffd8a0, blendMode: ADD,
+    }).setDepth(4.5);
+
+    // ---------- state ----------
+    const staticRoom = !(R.type === 'chase' || R.type === 'dark');
+    this.homeX = R.type === 'boss' ? 300 : W / 2 - 40;
+    this.kid = { x: staticRoom ? -40 : 110, walk: 0, courage: TUNE.courage, invuln: 0, scared: false, stepT: 0, face: 1, moving: false, blinkT: 2 };
+    this.g = 0; this.wax = TUNE.waxMax; this.flick = 0; this.lit = true; this.shadowA = 1; this.rage = 0;
+    this.monsters = []; this.splats = []; this.watchers = []; this.ravens = []; this.afterimages = [];
+    this.hand = { x: 300, y: 300, px: 300, py: 300, vx: 0, vy: 0, slam: 0, hist: [] };
+    this.held = null; this.dash = null; this.wolfCool = 0; this.ravenCool = 0;
+    this.unlocked = R.forms.slice(); this.form = 'hand';
+    this.mode = R.type === 'dark' ? 'normal' : R.type === 'chase' ? 'chase' : R.type;
+    this.state = 'cut'; this.cool = 0; this.stopT = 0; this.punch = 0; this.slowT = 0;
+    this.roomScore0 = this.registry.get('score') || 0;
+    this.score = this.roomScore0; this.combo = 0; this.comboT = 0; this.bestCombo = this.registry.get('best') || 0;
+    this.chase = null; this.heartT = 0; this.boss = null; this.hits = 0; this.roomT = 0;
+    this.waveIdx = -1; this.pending = 0; this.waveGap = 0; this.seen = this.registry.get('seen') || {};
+    this.kidWalkTo = undefined; this.giftCandle = false;
+    this.timeStop = 0; this.stopCool = 0; this.tickT = 0;
+    this.hintsSeen = this.registry.get('hints') || {}; this.hintBusy = 0; this.missedParry = 0;
+    this.sparks = []; this.bubble = null; this.boltT = 7 + Math.random() * 6; this.bolt = 0;
+    this.hasStop = this.ri >= POWER_ROOM;
+
+    // ---------- overlays + HUD ----------
+    this.slowTint = this.add.rectangle(0, 0, W, H, 0x9fe8ff, 0).setOrigin(0).setScrollFactor(0).setDepth(7.4);
+    this.giantTint = this.add.rectangle(0, 0, W, H, 0x6a3cff, 0).setOrigin(0).setScrollFactor(0).setDepth(7.5);
+    this.add.image(0, 0, 'vignette').setOrigin(0).setScrollFactor(0).setDepth(8);
+    this.freezeG = this.add.graphics().setScrollFactor(0).setDepth(18);
+    this.hud = this.add.graphics().setScrollFactor(0).setDepth(10);
+    this.hudItems = [this.hud];
+    const hudT = (o) => { this.hudItems.push(o); return o; };
+    this.prompt = addText(this, W / 2, 84, '', 12, '#ffe8c0', { align: 'center', lineSpacing: 10 }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(11).setShadow(0, 0, '#000', 8, false, true);
+    this.scoreTxt = hudT(addText(this, W / 2, 14, '0', 14, '#ffffff').setOrigin(0.5, 0).setScrollFactor(0).setDepth(11));
+    this.comboTxt = hudT(addText(this, W / 2, 36, '', 11, '#ffb347').setOrigin(0.5, 0).setScrollFactor(0).setDepth(11));
+    this.roomTxt = hudT(addText(this, W - 16, 16, R.name, 8, '#6a6290').setOrigin(1, 0).setScrollFactor(0).setDepth(11));
+    this.clockTxt = hudT(addText(this, W - 16, 30, '', 12, '#ffd27a').setOrigin(1, 0).setScrollFactor(0).setDepth(11));
+    this.stopTxt = hudT(addText(this, W / 2 + 190, H - 22, 'F STOP TIME', 8, '#9fe8ff').setOrigin(0.5).setScrollFactor(0).setDepth(11));
+    this.timeTint = this.add.rectangle(0, 0, W, H, 0x6fd8ff, 0).setOrigin(0).setScrollFactor(0).setDepth(7.45);
+    this.formTxts = ['hand', 'wolf', 'raven'].map((f, i) => hudT(addText(this, W / 2 - 90 + i * 90, H - 22, FORMS[f].key + ' ' + FORMS[f].name, 8, FORMS[f].color).setOrigin(0.5).setScrollFactor(0).setDepth(11)));
+    this.hintTxt = addText(this, W / 2, H - 58, '', 9, '#ffffff', { align: 'center', lineSpacing: 6, backgroundColor: '#1a1430', padding: { x: 10, y: 7 } }).setOrigin(0.5, 1).setScrollFactor(0).setDepth(13).setAlpha(0);
+    this.giantTxt = addText(this, W - 20, 50, 'GIANT!', 12, '#c9a8ff').setOrigin(1, 0).setScrollFactor(0).setDepth(11).setAlpha(0);
+    this.centerTxt = addText(this, W / 2, H / 2 - 50, '', 20, '#ffffff', { align: 'center', lineSpacing: 14 }).setOrigin(0.5).setScrollFactor(0).setDepth(12);
+    this.bars = [this.add.rectangle(0, 0, W, 50, 0x000000).setOrigin(0).setScrollFactor(0).setDepth(20), this.add.rectangle(0, H - 50, W, 50, 0x000000).setOrigin(0).setScrollFactor(0).setDepth(20)];
+    this.setBars(true, true);
+    if (this.trailer) this.hudItems.forEach(o => o.setVisible(false));
+
+    // ---------- input ----------
+    this.keys = this.input.keyboard.addKeys('SPACE,SHIFT,M,R,A,D,LEFT,RIGHT,ONE,TWO,THREE,Q,E,F,ESC,P,X');
+    this.input.mouse.disableContextMenu();
+    this.input.on('pointerdown', (p) => { AudioSys.ac(); if (this.paused) return; if (p.button === 0) { if (this.state === 'qte') this.qteHit(); else this.action(); } });
+    this.input.on('pointerup', (p) => { if (p.button === 0) this.release(); });
+    this.input.on('wheel', (p, go, dx, dy) => this.cycleForm(dy > 0 ? 1 : -1));
+    this.keys.ONE.on('down', () => this.setForm('hand'));
+    this.keys.TWO.on('down', () => this.setForm('wolf'));
+    this.keys.THREE.on('down', () => this.setForm('raven'));
+    this.keys.Q.on('down', () => this.cycleForm(-1));
+    this.keys.E.on('down', () => this.cycleForm(1));
+    this.keys.F.on('down', () => this.stopTime());
+    this.keys.SPACE.on('down', () => { if (this.state === 'qte') this.qteHit(); });
+    this.keys.M.on('down', () => AudioSys.toggleMute());
+    this.keys.R.on('down', () => { if (this.paused) this.togglePause(); this.scene.restart({ room: this.ri, retry: true }); });
+    this.keys.ESC.on('down', () => this.togglePause());
+    this.keys.P.on('down', () => this.togglePause());
+    this.keys.X.on('down', () => { if (this.paused) { this.togglePause(); Music.play('title'); this.scene.start('Title'); } });
+    this.paused = false;
+
+    if (R.type === 'boss') this.setupBoss();
+    this.roomIntro();
+  }
+
+  // ================= cinematic helpers =================
+  setBars(on, instant) {
+    const show = on || this.trailer;
+    this.bars.forEach((b, i) => {
+      const y = i === 0 ? (show ? 0 : -50) : (show ? H - 50 : H);
+      if (instant) b.y = y; else this.tweens.add({ targets: b, y, duration: 350 });
+    });
+  }
+  say(text, dur = 3) {
+    this.prompt.setText(text).setAlpha(1).setScale(1.15);
+    this.tweens.killTweensOf(this.prompt);
+    this.tweens.add({ targets: this.prompt, scale: 1, duration: 220, ease: 'Back.easeOut' });
+    this.tweens.add({ targets: this.prompt, alpha: 0, duration: 600, delay: dur * 1000 });
+  }
+  big(text, color = '#ffffff', size = 22, dur = 1.4, y = H / 2 - 40) {
+    const t = addText(this, W / 2, y, text, size, color, { align: 'center', lineSpacing: 12 }).setOrigin(0.5).setScrollFactor(0).setDepth(15).setScale(2.2).setAlpha(0).setShadow(0, 0, '#000', 10, true, true);
+    this.tweens.add({ targets: t, scale: 1, alpha: 1, duration: 180, ease: 'Cubic.easeIn' });
+    this.time.delayedCall(dur * 1000, () => this.tweens.add({ targets: t, alpha: 0, duration: 400, onComplete: () => t.destroy() }));
+    return t;
+  }
+  cut(steps) { let t = 0; const k = this.auto && this.R && this.R.type === 'boss' ? 0.8 : 1; for (const [d, fn] of steps) { t += d * k; this.time.delayedCall(t * 1000, fn); } }
+  slowmo(sec) { this.slowT = Math.max(this.slowT, sec); Sfx.slow(); }
+
+  // Borderlands-style freeze frame: everything stops, a banner points at the subject.
+  freezeFrame(getXY, name, sub, color) {
+    if (this.trailer === 'skip') return;
+    const prev = this.state; this.state = 'freeze';
+    const p = getXY(), cam = this.cameras.main, sx = p.x - cam.scrollX, sy = p.y;
+    const fg = this.freezeG; fg.clear();
+    fg.fillStyle(0x000000, 0.55); fg.fillRect(0, 0, W, H);
+    fg.lineStyle(3, Phaser.Display.Color.HexStringToColor(color).color, 1); fg.strokeCircle(sx, sy, 46);
+    const bx = sx < W / 2 ? sx + 90 : sx - 90 - 380, by = Phaser.Math.Clamp(sy - 120, 70, H - 200);
+    fg.fillStyle(0x000000, 0.85); fg.fillPoints([{ x: bx, y: by + 20 }, { x: bx + 380, y: by }, { x: bx + 380, y: by + 90 }, { x: bx, y: by + 110 }], true);
+    fg.fillStyle(Phaser.Display.Color.HexStringToColor(color).color, 1); fg.fillRect(bx, by + 18, 8, 92);
+    fg.lineStyle(2, 0xffffff, 0.8); fg.lineBetween(sx + (sx < W / 2 ? 46 : -46), sy, sx < W / 2 ? bx : bx + 380, by + 55);
+    const nt = addText(this, bx + 30, by + 30, name, 26, color).setScrollFactor(0).setDepth(19).setScale(1.8).setAlpha(0).setShadow(0, 0, '#000', 8, true, true);
+    const st = addText(this, bx + 30, by + 72, sub, 9, '#ffffff', { lineSpacing: 6 }).setScrollFactor(0).setDepth(19).setAlpha(0);
+    this.tweens.add({ targets: nt, scale: 1, alpha: 1, duration: 140, ease: 'Cubic.easeIn', onComplete: () => { Sfx.card(); this.cameras.main.shake(140, 0.008); } });
+    this.tweens.add({ targets: st, alpha: 1, duration: 300, delay: 200 });
+    this.time.delayedCall(1350, () => { fg.clear(); nt.destroy(); st.destroy(); if (this.state === 'freeze') this.state = prev; });
+  }
+  introOnce(key, getXY, name, sub, color, delay = 450) {
+    if (this.seen[key]) return;
+    this.seen[key] = true; this.registry.set('seen', this.seen);
+    this.time.delayedCall(delay, () => { if (this.state === 'play') this.freezeFrame(getXY, name, sub, color); });
+  }
+
+  // ================= room flow =================
+  roomIntro() {
+    const R = this.R, k = this.kid;
+    if (this.ri === 0 && !this.retry) { this.coldOpen(); return; }
+    const tcard = addText(this, W / 2, H / 2 - 46, fmtClock(R.clock), 14, '#ffd27a').setOrigin(0.5).setScrollFactor(0).setDepth(21).setShadow(0, 0, '#000', 8, true, true);
+    this.time.delayedCall(1100, () => this.tweens.add({ targets: tcard, alpha: 0, duration: 300, onComplete: () => tcard.destroy() }));
+    const card = addText(this, W / 2, H / 2 - 10, R.name, 22, R.type === 'boss' ? '#ff6a8a' : '#ffb347').setOrigin(0.5).setScrollFactor(0).setDepth(21).setAlpha(0).setScale(1.6).setShadow(0, 0, '#000', 10, true, true);
+    this.tweens.add({ targets: card, alpha: 1, scale: 1, duration: 180, ease: 'Cubic.easeIn', onComplete: () => Sfx.card() });
+    if (this.kid.x < 0) this.kidWalkTo = this.homeX;
+    this.time.delayedCall(1100, () => {
+      this.tweens.add({ targets: card, alpha: 0, duration: 300, onComplete: () => card.destroy() });
+      if (R.unlock && !this.retry) this.unlockSplash(R.unlock, () => this.startRoom());
+      else if (this.ri === POWER_ROOM && !this.retry) this.unlockPower(() => this.startRoom());
+      else this.startRoom();
+    });
+  }
+  coldOpen() {
+    // straight into the night: no menus, the title slams in after the first fight
+    const k = this.kid;
+    this.lit = false; this.shadowA = 0; k.x = this.homeX;
+    this.cut([
+      [0.4, () => { Sfx.scratch(); }],
+      [0.4, () => { Sfx.scratch(); }],
+      [0.4, () => { Sfx.ignite(); this.lit = true; this.fireFx.explode(20, this.candlePos.x, this.candlePos.y); }],
+      [0.8, () => { this.state = 'play'; this.freezeFrame(() => ({ x: k.x, y: FLOOR - 40 }), 'MILO', '7 YEARS OLD.\nAFRAID OF THE DARK.', '#8fb0f0'); this.state = 'freeze'; }],
+      [1.9, () => { this.state = 'cut'; Sfx.roar(); this.cameras.main.shake(700, 0.012); this.tweens.add({ targets: this, shadowA: 1, duration: 600 }); }],
+      [0.9, () => { this.state = 'play'; this.freezeFrame(() => ({ x: k.x - 30, y: FLOOR - 170 }), 'SHADE', "HIS SHADOW.\nTHAT'S YOU.", '#c9a8ff'); }],
+      [1.9, () => { this.setBars(false); this.state = 'play'; this.say('CLICK: SMASH   -   HOLD & RELEASE: THROW\nHOLD RIGHT-CLICK / SPACE: GIANT', 4); this.nextWave(); }],
+    ]);
+  }
+  unlockSplash(form, done) {
+    const F = FORMS[form];
+    this.state = 'cut'; this.setBars(true);
+    Sfx.rage(); this.cameras.main.shake(500, 0.012); this.goldFx.explode(60, this.kid.x - 30, FLOOR - 160);
+    this.form = form; this.formFlash = 1;
+    const a = addText(this, W / 2, H / 2 - 70, 'NEW SHADOW FORM', 11, '#ffffff').setOrigin(0.5).setScrollFactor(0).setDepth(21).setAlpha(0);
+    const b = addText(this, W / 2, H / 2 - 30, F.name, 40, F.color).setOrigin(0.5).setScrollFactor(0).setDepth(21).setScale(2.5).setAlpha(0).setShadow(0, 0, '#000', 12, true, true);
+    const c = addText(this, W / 2, H / 2 + 20, 'PRESS ' + F.key + ' (OR WHEEL)  -  ' + F.tip, 9, '#ffe8c0').setOrigin(0.5).setScrollFactor(0).setDepth(21).setAlpha(0);
+    this.tweens.add({ targets: a, alpha: 1, duration: 200 });
+    this.tweens.add({ targets: b, alpha: 1, scale: 1, duration: 200, delay: 150, ease: 'Cubic.easeIn', onComplete: () => Sfx.card() });
+    this.tweens.add({ targets: c, alpha: 1, duration: 300, delay: 450 });
+    this.time.delayedCall(2300, () => { [a, b, c].forEach(o => this.tweens.add({ targets: o, alpha: 0, duration: 300, onComplete: () => o.destroy() })); done(); });
+  }
+  unlockPower(done) {
+    this.state = 'cut'; this.setBars(true);
+    Sfx.timestop(); this.cameras.main.shake(400, 0.01); this.timeTint.setAlpha(0.25);
+    this.tweens.add({ targets: this.timeTint, alpha: 0, duration: 1600 });
+    const a = addText(this, W / 2, H / 2 - 70, 'NEW SHADOW POWER', 11, '#ffffff').setOrigin(0.5).setScrollFactor(0).setDepth(21).setAlpha(0);
+    const b = addText(this, W / 2, H / 2 - 30, 'STOP THE CLOCK', 34, '#9fe8ff').setOrigin(0.5).setScrollFactor(0).setDepth(21).setScale(2.5).setAlpha(0).setShadow(0, 0, '#000', 12, true, true);
+    const c = addText(this, W / 2, H / 2 + 22, 'PRESS F: FREEZE EVERYTHING FOR 3 SECONDS - EVEN THE DARK.\nCOSTS CANDLE WAX.', 9, '#ffe8c0', { align: 'center', lineSpacing: 8 }).setOrigin(0.5).setScrollFactor(0).setDepth(21).setAlpha(0);
+    this.tweens.add({ targets: a, alpha: 1, duration: 200 });
+    this.tweens.add({ targets: b, alpha: 1, scale: 1, duration: 200, delay: 150, ease: 'Cubic.easeIn', onComplete: () => Sfx.card() });
+    this.tweens.add({ targets: c, alpha: 1, duration: 300, delay: 450 });
+    this.time.delayedCall(2600, () => { [a, b, c].forEach(o => this.tweens.add({ targets: o, alpha: 0, duration: 300, onComplete: () => o.destroy() })); done(); });
+  }
+  // ---- STOP THE CLOCK: freeze monsters, the boss, the chasing dark and the candle for 3 s ----
+  stopTime() {
+    if (!this.hasStop || this.state !== 'play' || this.timeStop > 0 || this.stopCool > 0 || this.wax < 14) return;
+    this.wax -= 10; this.timeStop = 3; this.stopCool = 9; this.tickT = 0;
+    Sfx.timestop(); this.cameras.main.flash(160, 160, 230, 255); this.punch = 0.05;
+    this.big('TIME STOPPED', '#9fe8ff', 20, 0.9, 140);
+  }
+  startRoom() {
+    const R = this.R;
+    this.setBars(false); this.state = 'play';
+    if (R.type === 'fight') this.nextWave();
+    else if (R.type === 'wind') this.windStart();
+    else if (R.type === 'chase') this.startChase();
+    else if (R.type === 'dark') this.darkStart();
+    else if (R.type === 'boss') this.bossIntro();
+  }
+  roomClear() {
+    if (this.state === 'clear') return;
+    this.state = 'clear';
+    if (this.held) { this.held.held = false; this.held = null; }
+    const R = this.R, t = this.roomT;
+    const rank = this.hits === 0 && t <= R.par ? 'S' : this.hits <= 1 && t <= R.par * 1.5 ? 'A' : 'B';
+    const bonus = { S: 3000, A: 1500, B: 500 }[rank];
+    this.score += bonus;
+    const rs = this.registry.get('ratings') || []; rs[this.ri] = rank; this.registry.set('ratings', rs);
+    this.registry.set('score', this.score); this.registry.set('best', this.bestCombo);
+    Sfx.win();
+    const col = { S: '#ffe066', A: '#7fe8ff', B: '#c9a8ff' }[rank];
+    this.kid.hop = 0.6; this.miloSay(Phaser.Utils.Array.GetRandom(['WE DID IT!', 'YAY!', 'NEXT ROOM!', 'I FEEL BRAVER!']), 1.6);
+    const best = Best.get(); best.rooms = best.rooms || {};
+    const RV = { S: 3, A: 2, B: 1 }, newBest = (RV[rank] || 0) > (RV[best.rooms[R.key]] || 0);
+    if (newBest && !this.auto) { best.rooms[R.key] = rank; Best.set(best); }
+    const counter = { v: this.roomScore0 };
+    const sc = addText(this, W / 2, H / 2 + 82, String(this.roomScore0), 16, '#ffffff').setOrigin(0.5).setScrollFactor(0).setDepth(16).setAlpha(0);
+    const nb = newBest && !this.auto && best.rooms ? addText(this, W / 2, H / 2 - 106, 'NEW BEST!', 12, '#ffd700').setOrigin(0.5).setScrollFactor(0).setDepth(16).setAlpha(0) : null;
+    this.time.delayedCall(R.key === 'open' ? 2000 : 600, () => {
+      if (!sc.active) return;
+      sc.setAlpha(1); let lastTick = 0;
+      this.tweens.add({ targets: counter, v: this.score, duration: 900, ease: 'Cubic.easeOut',
+        onUpdate: () => { if (!sc.active) return; sc.setText(Math.round(counter.v).toLocaleString('en-US')); if (this.time.now - lastTick > 60) { lastTick = this.time.now; Sfx.tick(); } },
+        onComplete: () => { if (nb && nb.active) { nb.setAlpha(1).setScale(1.6); this.tweens.add({ targets: nb, scale: 1, duration: 200 }); Sfx.best(); } } });
+    });
+    this.time.delayedCall(R.key === 'open' ? 3000 : 2100, () => { sc.destroy(); if (nb) nb.destroy(); });
+    const a = addText(this, W / 2, H / 2 - 70, R.key === 'open' ? '' : 'ROOM CLEAR', 22, '#ffffff').setOrigin(0.5).setScrollFactor(0).setDepth(16).setAlpha(0).setShadow(0, 0, '#000', 10, true, true);
+    const b = addText(this, W / 2, H / 2, rank, 64, col).setOrigin(0.5).setScrollFactor(0).setDepth(16).setScale(3).setAlpha(0).setShadow(0, 0, '#000', 14, true, true);
+    const c = addText(this, W / 2, H / 2 + 56, `TIME ${t.toFixed(1)}s   HITS ${this.hits}   BONUS +${bonus}`, 9, '#e8e2ff').setOrigin(0.5).setScrollFactor(0).setDepth(16).setAlpha(0);
+    this.time.delayedCall(R.key === 'open' ? 1800 : 300, () => {
+      this.tweens.add({ targets: a, alpha: 1, duration: 200 });
+      this.tweens.add({ targets: b, alpha: 1, scale: 1, duration: 200, delay: 250, ease: 'Cubic.easeIn', onComplete: () => { Sfx.card(); this.cameras.main.shake(200, 0.012); } });
+      this.tweens.add({ targets: c, alpha: 1, duration: 300, delay: 500 });
+    });
+    if (R.key === 'open') this.titleSlam();
+    this.time.delayedCall(R.key === 'open' ? (this.auto ? 2600 : 3900) : (this.auto ? 1300 : 2200), () => { [a, b, c].forEach(o => o.destroy()); this.exitRun(); });
+  }
+  titleSlam() {
+    // the game's title only appears after the cold open fight
+    this.setBars(true);
+    const t = addText(this, W / 2, H / 2 - 30, 'S H A D E', 54, '#ffb347').setOrigin(0.5).setScrollFactor(0).setDepth(17).setScale(3).setAlpha(0).setShadow(0, 0, '#ff5a1f', 26, true, true);
+    const s = addText(this, W / 2, H / 2 + 30, 'YOU ARE HIS SHADOW.', 12, '#ffffff').setOrigin(0.5).setScrollFactor(0).setDepth(17).setAlpha(0);
+    this.tweens.add({ targets: t, alpha: 1, scale: 1, duration: 260, ease: 'Cubic.easeIn', onComplete: () => { Sfx.roar(); Sfx.card(); this.cameras.main.shake(500, 0.02); this.cameras.main.flash(200, 255, 160, 80); } });
+    this.tweens.add({ targets: s, alpha: 1, duration: 400, delay: 500 });
+    this.time.delayedCall(1700, () => this.tweens.add({ targets: [t, s], alpha: 0, duration: 300, onComplete: () => { t.destroy(); s.destroy(); } }));
+  }
+  exitRun() {
+    this.state = 'exit'; this.setBars(true);
+    for (const m of this.monsters) if (m.alive) this.killMonster(m, 'quiet');
+    const next = this.ri + 1;
+    this.time.delayedCall(this.R.type === 'chase' || this.R.type === 'dark' ? 400 : 900, () => {
+      this.cameras.main.fadeOut(300, 0, 0, 0);
+      this.cameras.main.once('camerafadeoutcomplete', () => this.scene.restart({ room: next }));
+    });
+  }
+  fail(msg) {
+    if (this.state !== 'play') return;
+    this.state = 'fail';
+    this.registry.set('rewinds', (this.registry.get('rewinds') || 0) + 1);
+    this.registry.set('score', this.roomScore0);
+    Sfx.fail();
+    if (this.held) { this.held.held = false; this.held = null; }
+    this.centerTxt.setText(msg + '\n\nRETRYING...').setAlpha(0);
+    this.tweens.add({ targets: this.centerTxt, alpha: 1, duration: 300 });
+    this.cameras.main.fadeOut(1100, 0, 0, 0);
+    this.time.delayedCall(1200, () => this.scene.restart({ room: this.ri, retry: true }));
+  }
+
+  // ================= pause =================
+  togglePause() {
+    if (this.registry.get('autoplay')) return;
+    if (!this.paused && !['play', 'freeze', 'cut'].includes(this.state)) return;
+    this.paused = !this.paused;
+    this.time.paused = this.paused;
+    if (this.paused) {
+      this.tweens.pauseAll();
+      if (this.held) this.release();
+      const D = 60, cx = W / 2;
+      const veil = this.add.rectangle(0, 0, W, H, 0x05040c, 0.82).setOrigin(0).setScrollFactor(0).setDepth(D);
+      const card = this.add.graphics().setScrollFactor(0).setDepth(D + 1);
+      card.fillStyle(0x110d22, 1); card.fillRoundedRect(cx - 330, 110, 660, 330, 12);
+      card.lineStyle(2, 0xffb347, 0.55); card.strokeRoundedRect(cx - 330, 110, 660, 330, 12);
+      card.lineStyle(1, 0xffb347, 0.25); card.lineBetween(cx, 170, cx, 400);
+      const t = (x, y, s, size, col, ox = 0) => addText(this, x, y, s, size, col).setOrigin(ox, 0.5).setScrollFactor(0).setDepth(D + 2);
+      this.pauseUI = [veil, card,
+        t(cx, 142, 'PAUSED', 24, '#ffb347', 0.5),
+        t(cx - 300, 190, 'MENU', 10, '#ffb347'),
+        t(cx - 300, 226, 'ESC / P   RESUME', 9, '#ffffff'),
+        t(cx - 300, 258, 'R   RESTART ROOM', 9, '#ffffff'),
+        t(cx - 300, 290, 'M   SOUND ON / OFF', 9, '#ffffff'),
+        t(cx - 300, 322, 'X   QUIT TO TITLE', 9, '#ffffff'),
+        t(cx + 24, 190, 'CONTROLS', 10, '#ffb347'),
+        ...CONTROLS.flatMap(([k, v], i) => [t(cx + 24, 222 + i * 26, k, 7, '#ffd27a'), t(cx + 306, 222 + i * 26, v, 7, '#e8e2ff', 1)]),
+        t(cx, 418, this.R.name + '   ' + fmtClock(this.R.clock), 8, '#9a90c0', 0.5)];
+    } else {
+      this.tweens.resumeAll();
+      (this.pauseUI || []).forEach(o => o.destroy()); this.pauseUI = null;
+    }
+  }
+
+  // ================= forms =================
+  setForm(f) {
+    if (!this.unlocked.includes(f) || this.form === f) return;
+    if (this.held) this.release();
+    this.form = f; this.formFlash = 1; Sfx.form();
+    this.smokeFx.explode(12, this.hand.x, this.hand.y);
+  }
+  cycleForm(d) {
+    const u = this.unlocked; if (u.length < 2) return;
+    this.setForm(u[(u.indexOf(this.form) + d + u.length) % u.length]);
+  }
+  action() {
+    if (!this.canUseHand()) return;
+    if (this.form === 'wolf') this.wolfDash();
+    else if (this.form === 'raven') this.ravenFlock();
+    else this.press();
+  }
+  wolfDash() {
+    if (this.wolfCool > 0 || this.dash) return;
+    const cam = this.cameras.main, ptr = this.input.activePointer, wp = cam.getWorldPoint(ptr.x, ptr.y);
+    const o = this.shadowPose ? this.shadowPose.chest : { x: this.kid.x, y: FLOOR - 120 };
+    let dx = wp.x - o.x, dy = Math.min(wp.y, FLOOR - 30) - o.y; const d = Math.hypot(dx, dy) || 1; dx /= d; dy /= d;
+    const len = TUNE.wolfLen * (this.g > 0.5 ? 1.25 : 1);
+    this.dash = { x0: o.x, y0: o.y, x1: o.x + dx * len, y1: Phaser.Math.Clamp(o.y + dy * len, 70, FLOOR - 30), t: 0, dur: 0.22, dir: dx >= 0 ? 1 : -1, hit: new Set(), boss: false };
+    this.wolfCool = TUNE.wolfCool;
+    Sfx.wolf(); this.cameras.main.shake(120, 0.006);
+  }
+  ravenFlock() {
+    if (this.ravenCool > 0) return;
+    const cam = this.cameras.main, ptr = this.input.activePointer, wp = cam.getWorldPoint(ptr.x, ptr.y);
+    const o = this.shadowPose ? this.shadowPose.head : { x: this.kid.x, y: FLOOR - 200 };
+    const targets = this.monsters.filter(m => m.alive && !m.held).sort((a, b) => Math.hypot(a.x - wp.x, a.y - wp.y) - Math.hypot(b.x - wp.x, b.y - wp.y));
+    const flock = { bossHits: 0 };
+    for (let i = 0; i < TUNE.ravenCount; i++) {
+      const t = targets.length ? targets[i % targets.length] : null;
+      const a = -Math.PI / 2 + (i - 2.5) * 0.4;
+      this.ravens.push({ x: o.x, y: o.y, vx: Math.cos(a) * 300, vy: Math.sin(a) * 300, target: t, life: 1.8, aim: { x: wp.x + (i - 2.5) * 30, y: wp.y }, flock, seed: Math.random() * 10 });
+    }
+    this.ravenCool = TUNE.ravenCool;
+    Sfx.ravens();
+  }
+  updateForms(dt) {
+    this.wolfCool = Math.max(0, this.wolfCool - dt); this.ravenCool = Math.max(0, this.ravenCool - dt);
+    this.formFlash = Math.max(0, (this.formFlash || 0) - dt * 2);
+    const sc = this.S / TUNE.scaleNormal * 1.7;          // the dash wolf is BIG
+    if (this.dash) {
+      const D = this.dash; D.t += dt;
+      const p = Math.min(1, D.t / D.dur), e = 1 - Math.pow(1 - p, 2);
+      D.x = D.x0 + (D.x1 - D.x0) * e; D.y = D.y0 + (D.y1 - D.y0) * e;
+      this.afterimages.push({ x: D.x, y: D.y, dir: D.dir, a: 0.45, s: sc });
+      for (const m of this.monsters) {
+        if (!m.alive || m.held || D.hit.has(m)) continue;
+        if (Math.hypot(m.x - D.x, m.y - D.y) < m.r + 34 * sc) { D.hit.add(m); this.damage(m, 3, 'wolf'); }
+      }
+      if (this.boss && this.boss.stun > 0 && !D.boss) { const c = this.bossCore(); if (Math.hypot(c.x - D.x, c.y - D.y) < 90) { D.boss = true; this.bossDamage(2, 'wolf'); } }
+      if (p >= 1) { if (D.hit.size >= 4) this.big('PACK HUNT x' + D.hit.size + '!', '#ffb347', 16, 0.8, 140); this.dash = null; }
+    }
+    for (const a of this.afterimages) a.a -= dt * 2.2;
+    this.afterimages = this.afterimages.filter(a => a.a > 0);
+    for (const r of this.ravens) {
+      r.life -= dt;
+      let tx = r.aim.x, ty = r.aim.y;
+      if (r.target && r.target.alive) { tx = r.target.x; ty = r.target.y; }
+      else if (this.boss && this.boss.stun > 0) { const c = this.bossCore(); tx = c.x; ty = c.y; }
+      const dx = tx - r.x, dy = ty - r.y, d = Math.hypot(dx, dy) || 1;
+      r.vx += (dx / d * 760 - r.vx) * Math.min(1, dt * 7); r.vy += (dy / d * 760 - r.vy) * Math.min(1, dt * 7);
+      r.x += r.vx * dt; r.y += r.vy * dt;
+      for (const m of this.monsters) if (m.alive && !m.held && Math.hypot(m.x - r.x, m.y - r.y) < m.r + 10) { this.damage(m, 1, 'raven'); r.life = 0; this.featherFx.explode(8, r.x, r.y); break; }
+      if (r.life > 0 && this.boss && this.boss.stun > 0 && r.flock.bossHits < 2) { const c = this.bossCore(); if (Math.hypot(c.x - r.x, c.y - r.y) < 60) { r.flock.bossHits++; r.life = 0; this.featherFx.explode(10, r.x, r.y); this.bossDamage(1, 'raven'); } }
+      if (r.life > 0 && !(r.target && r.target.alive) && d < 20) r.life = Math.min(r.life, 0.1);
+    }
+    this.ravens = this.ravens.filter(r => r.life > 0);
+  }
+
+  get S() { return (TUNE.scaleNormal + (TUNE.scaleGiant - TUNE.scaleNormal) * this.g) * (this.rage > 0 ? 1.15 : 1); }
+  get lightR() { return this.lit ? TUNE.lightNormal + (TUNE.lightGiant - TUNE.lightNormal) * this.g : 0; }
+  get candlePos() { return { x: this.kid.x + 15 * this.kid.face, y: FLOOR - 46 + this.g * 14 }; }
+  get handR() { return TUNE.handPerScale * this.S * (this.rage > 0 ? 1.3 : 1); }
+  get reach() { return TUNE.reachPerScale * this.S * (this.R.type === 'boss' ? 1.3 : 1); }
+
+  // ================= hand =================
+  canUseHand() { return this.state === 'play' && this.mode !== 'dark' && this.shadowA > 0.5; }
+  press() {
+    const hd = this.hand, r = this.handR * 1.5;
+    let best = null, bd = 1e9;
+    for (const m of this.monsters) {
+      if (!m.alive || m.thrown) continue;
+      const d = Math.hypot(m.x - hd.x, m.y - hd.y) - m.r;
+      if (d < r && d < bd) { bd = d; best = m; }
+    }
+    if (best && MONSTER[best.type].grab) {
+      this.held = best; best.held = true; best.lunge = 0; best.wind = 0; best.march = false;
+      Sfx.grab(); this.smokeFx.explode(6, best.x, best.y);
+    } else {
+      if (best && !MONSTER[best.type].grab && bd < this.handR * 0.6) this.popup(best.x, best.y - 30, 'TOO HEAVY! TRY THE WOLF', '#c9a8ff');
+      this.smash();
+    }
+  }
+  release() {
+    const m = this.held; if (!m) return;
+    this.held = null; m.held = false;
+    let vx = 0, vy = 0; const hs = this.hand.hist;
+    for (const v of hs) { vx += v[0]; vy += v[1]; }
+    vx /= Math.max(1, hs.length); vy /= Math.max(1, hs.length);
+    const sp = Math.hypot(vx, vy), max = 1500;
+    if (sp > max) { vx *= max / sp; vy *= max / sp; }
+    m.vx = vx; m.vy = vy;
+    if (sp > 260) { m.thrown = 1.4; Sfx.throwIt(); } else m.thrown = 0.6;
+  }
+  smash() {
+    if (this.cool > 0) return;
+    this.cool = 0.2; this.hand.slam = 0.16;
+    const r = this.handR * 1.3;
+    let hit = 0;
+    for (const m of this.monsters) if (m.alive && !m.held && Math.hypot(m.x - this.hand.x, m.y - this.hand.y) < r + m.r) { this.damage(m, 1, 'smash'); hit++; }
+    if (this.boss) this.smashBoss();
+    Sfx.smash(); this.smokeFx.explode(10, this.hand.x, this.hand.y);
+    this.cameras.main.shake(hit ? 140 : 70, hit ? 0.009 : 0.003);
+  }
+
+  // ================= monsters =================
+  spawnMonster(type, x, y, extra) {
+    const T = MONSTER[type];
+    if (type === 'brute') y = FLOOR - T.r;
+    const m = Object.assign({ type, x, y, vx: 0, vy: 0, r: T.r, hp: T.hp, alive: true, sp: T.sp * (0.9 + Math.random() * 0.25),
+      seed: Math.random() * 10, born: 0, lungeT: 1.2 + Math.random() * 2, wind: 0, lunge: 0, held: false, thrown: 0, flash: 0, march: false }, extra || {});
+    if (type === 'wisp' && !m.march && Math.random() < (this.auto ? 0.2 : 0.09)) m.golden = true;      // rare jackpot monster (more often in the trailer)
+    this.monsters.push(m);
+    this.smokeFx.explode(16, Phaser.Math.Clamp(x, this.cameras.main.scrollX + 10, this.cameras.main.scrollX + W - 10), y);
+    Sfx.spawn();
+    const cfg = { wisp: ['NIGHTLING', 'FEEDS ON FEAR.\nGRAB IT. THROW IT.', '#ffe066'], brute: ['BRUTE', 'TOO HEAVY TO GRAB.\nTHROW THINGS AT IT.', '#ff6a8a'], snuffer: ['SNUFFER', 'IT WANTS THE CANDLE.\nSWAT IT FIRST!', '#7fe8ff'] }[type];
+    this.introOnce(type, () => ({ x: Phaser.Math.Clamp(m.x, this.cameras.main.scrollX + 80, this.cameras.main.scrollX + W - 80), y: m.y }), cfg[0], cfg[1], cfg[2], type === 'snuffer' ? 900 : 650);
+    return m;
+  }
+  spawnEntry(e) {
+    const cam = this.cameras.main, L = cam.scrollX - 20, Rr = cam.scrollX + W + 20;
+    if (e.conga) {
+      const dir = e.conga === 'R' ? 1 : -1;
+      for (let i = 0; i < e.n; i++) {
+        const x = (dir > 0 ? Rr : L) + dir * i * 56;
+        this.spawnMonster(e.type, x, e.y || FLOOR - 40, { march: true, sp: 70 });
+      }
+      return;
+    }
+    const [type, side, y] = e;
+    const x = side === 'L' ? L : side === 'R' ? Rr : cam.scrollX + 120 + Math.random() * (W - 240);
+    this.spawnMonster(type, x, side === 'T' ? 60 : FLOOR - (y || 200));
+  }
+  nextWave() {
+    const waves = this.R.waves;
+    this.waveIdx++;
+    if (this.waveIdx >= waves.length) { this.roomClear(); return; }
+    const list = waves[this.waveIdx];
+    this.pending = list.length;
+    if (this.waveIdx === waves.length - 1 && waves.length > 1) this.big('FINAL WAVE', '#ff6a8a', 16, 0.9, 140);
+    list.forEach((e, i) => this.time.delayedCall(i * 240, () => { if (this.state === 'play' || this.state === 'freeze') { this.spawnEntry(e); } this.pending--; }));
+  }
+  damage(m, n, how) {
+    m.hp -= n; m.flash = 0.15;
+    if (m.type === 'brute' && m.hp > 0) {
+      m.vx = Math.sign(m.x - this.kid.x || 1) * 220;
+      this.popup(m.x, m.y - 40, 'HIT!', '#ffffff'); Sfx.thud(); this.stopT = Math.max(this.stopT, 0.035);
+      return;
+    }
+    if (m.hp <= 0) this.killMonster(m, how);
+  }
+  killMonster(m, how) {
+    if (!m.alive) return;
+    m.alive = false;
+    if (this.held === m) this.held = null;
+    this.poofFx.explode(m.type === 'brute' ? 50 : 26, m.x, m.y);
+    this.splats.push({ x: m.x + (Math.random() - 0.5) * 10, y: m.y, r: m.r * (1.2 + Math.random() * 0.6), t: 5, seed: Math.random() * 10 });
+    Sfx.poof();
+    if (how === 'quiet') return;
+    // embers: some kills send sparks into the candle (a little wax back)
+    const nSpark = m.golden ? 10 : Math.random() < 0.3 ? 2 : 0;
+    for (let i = 0; i < nSpark; i++) this.sparks.push({ x: m.x, y: m.y, vx: (Math.random() - 0.5) * 300, vy: -150 - Math.random() * 200, t: 0, wax: m.golden ? 1.2 : 1.5 });
+    // a kill right next to Milo is a close call
+    const near = Math.hypot(m.x - this.kid.x, m.y - (FLOOR - 32));
+    if (near < 70 && this.state === 'play' && this.R.type !== 'wind') this.closeCall(m);
+    this.combo = this.comboT > 0 ? this.combo + 1 : 1;
+    this.comboT = TUNE.comboWindow;
+    this.bestCombo = Math.max(this.bestCombo, this.combo);
+    const mult = { throw: 2, wolf: 1.5, raven: 1.3 }[how] || 1;
+    const pts = Math.round(MONSTER[m.type].score * this.combo * mult * (m.golden ? 5 : 1));
+    if (m.golden) { Sfx.golden(); this.goldFx.explode(60, m.x, m.y); this.big('GOLDEN!  x5', '#ffd700', 20, 0.7, 150); this.cameras.main.flash(120, 255, 215, 80); }
+    this.score += pts;
+    this.popup(m.x, m.y - 20, (how === 'throw' ? 'THROW! ' : '') + '+' + pts, { throw: '#ffb347', wolf: '#ffb347', raven: '#7fe8ff' }[how] || '#e8e2ff');
+    if (this.combo >= 3) { this.comboTxt.setScale(1.5); this.tweens.add({ targets: this.comboTxt, scale: 1, duration: 200 }); Sfx.combo(this.combo); }
+    for (const [n, name, col] of COMBO_TIERS) if (this.combo === n) { this.big(name + '!', col, 22, 0.8, 150); Sfx.tier(); break; }
+    this.stopT = Math.max(this.stopT, how === 'throw' ? 0.07 : 0.04);
+    this.punch = Math.min(0.06, this.punch + 0.02);
+    // slow-motion on the last kill of a fight room
+    if (this.R.type === 'fight' && this.waveIdx === this.R.waves.length - 1 && this.pending <= 0 && !this.monsters.some(o => o.alive)) {
+      this.slowmo(1.3); this.punch = 0.1; this.cameras.main.flash(150, 255, 255, 255);
+    }
+  }
+  impact(x, y, thrower) {
+    Sfx.boom(); this.boomFx.explode(40, x, y);
+    this.cameras.main.shake(220, 0.014); this.cameras.main.flash(80, 120, 80, 200);
+    this.killMonster(thrower, 'throw');
+    for (const o of this.monsters) {
+      if (!o.alive || o.held || o === thrower) continue;
+      if (Math.hypot(o.x - x, o.y - y) < 75 + o.r) this.damage(o, 3, 'throw');
+    }
+  }
+  popup(x, y, text, color) {
+    const t = addText(this, x, y, text, 10, color).setOrigin(0.5).setDepth(9).setShadow(0, 0, '#000', 4, false, true);
+    this.tweens.add({ targets: t, y: y - 40, alpha: 0, duration: 900, ease: 'Cubic.easeOut', onComplete: () => t.destroy() });
+  }
+  // one-time contextual hints (they only appear when the move is useful)
+  hint(key, text, dur = 4.5) {
+    if (this.auto || this.trailer || this.hintsSeen[key] || this.hintBusy > 0) return false;
+    this.hintsSeen[key] = true; this.registry.set('hints', this.hintsSeen);
+    this.hintBusy = dur + 0.5;
+    this.hintTxt.setText('TIP:  ' + text).setAlpha(0).setScale(1.1);
+    this.tweens.killTweensOf(this.hintTxt);
+    this.tweens.add({ targets: this.hintTxt, alpha: 1, scale: 1, duration: 220 });
+    this.tweens.add({ targets: this.hintTxt, alpha: 0, duration: 400, delay: dur * 1000 });
+    Sfx.blip();
+    return true;
+  }
+  checkHints(dt) {
+    this.hintBusy = Math.max(0, this.hintBusy - dt);
+    if (this.hintBusy > 0) return;
+    const k = this.kid, ms = this.monsters.filter(m => m.alive && !m.held), cp = this.candlePos;
+    const has = (f) => this.unlocked.includes(f);
+    if (ms.some(m => m.type === 'brute')) this.hint('brute', has('wolf') ? 'BRUTES ARE TOO HEAVY TO GRAB.\nPRESS 2 FOR WOLF AND CLICK TO DASH THROUGH IT!' : 'BRUTES ARE TOO HEAVY TO GRAB.\nHOLD CLICK ON A SMALL ONE, SWING, LET GO TO THROW IT!');
+    else if (ms.some(m => m.type === 'snuffer' && Math.hypot(m.x - cp.x, m.y - cp.y) < 230)) this.hint('moth', 'THAT MOTH WANTS THE CANDLE!\nSWAT IT BEFORE IT REACHES THE FLAME!');
+    else if (this.wax < TUNE.waxMax * 0.3 && this.R.type !== 'wind') this.hint('wax', 'THE CANDLE IS RUNNING LOW!\nKILL MONSTERS - THEIR EMBERS REFILL IT. DON\'T STAY GIANT TOO LONG.');
+    else if (k.courage === 1) this.hint('courage', 'MILO HAS ONE HEART LEFT!\nSMASH MONSTERS BEFORE THEY REACH HIM - RED EYES MEAN THEY WILL LUNGE!');
+    else if (has('wolf') && this.form !== 'wolf' && ms.filter(m => m.march).length >= 3 && this.roomT > 3) this.hint('wolfuse', 'A LINE OF MONSTERS!\nPRESS 2 FOR WOLF, THEN CLICK TO DASH THROUGH ALL OF THEM.');
+    else if (has('raven') && this.form !== 'raven' && ms.length >= 5 && this.roomT > 3) this.hint('ravenuse', 'SO MANY OF THEM!\nPRESS 3 FOR RAVENS, THEN CLICK TO SEND THE FLOCK.');
+    else if (this.chase && this.hasStop && this.stopCool <= 0 && k.x - this.chase.x < 170) this.hint('stop', 'THE DARK IS CATCHING UP!\nPRESS F TO STOP TIME AND FREEZE IT!');
+    else if (this.R.type === 'fight' && this.roomT > 6 && this.form === 'hand' && ms.length >= 2 && !this.hintsSeen.throwhint) this.hint('throwhint', 'COMBO TRICK: HOLD CLICK ON A MONSTER, SWING YOUR MOUSE\nAND LET GO - IT EXPLODES INTO THE OTHERS!');
+    else if (this.boss && this.missedParry >= 2) this.hint('parryhelp', 'PARRY TIP: PRESS 1 FOR HAND, HOLD SPACE FOR A BIGGER HAND,\nAND KEEP IT ON THE YELLOW DOT UNTIL THE SLAM.');
+  }
+  closeCall(m) {
+    if (this.time.now - (this.lastClose || 0) < 2500) return;
+    this.lastClose = this.time.now;
+    this.slowmo(0.55); Sfx.close(); this.punch = 0.07;
+    this.score += 250; this.popup(this.kid.x, FLOOR - 110, 'CLOSE CALL! +250', '#7fe8ff');
+    this.miloSay(Phaser.Utils.Array.GetRandom(['THANK YOU, SHADE!', 'THAT WAS CLOSE!', "YOU'RE THE BEST!", 'WHEW!', 'DON\'T LEAVE ME!']));
+  }
+  miloSay(text, dur = 1.8) {
+    if (this.bubble) this.bubble.destroy();
+    this.bubble = addText(this, this.kid.x, FLOOR - 76, text, 8, '#ffffff', { backgroundColor: '#1a1430', padding: { x: 6, y: 5 } }).setOrigin(0.5, 1).setDepth(9.5);
+    const b = this.bubble;
+    this.time.delayedCall(dur * 1000, () => this.tweens.add({ targets: b, alpha: 0, duration: 300, onComplete: () => { b.destroy(); if (this.bubble === b) this.bubble = null; } }));
+  }
+  hurtKid() {
+    const k = this.kid;
+    if (k.invuln > 0 || this.state !== 'play') return;
+    k.courage--; k.invuln = 1.6; this.hits++;
+    this.combo = 0; this.comboT = 0;
+    Sfx.whimper();
+    this.cameras.main.shake(260, 0.012); this.cameras.main.flash(200, 90, 0, 30);
+    if (k.courage <= 0) this.fail('THE DARK GOT HIM...');
+  }
+
+  // ================= room: THE WIND =================
+  // Gusts blow from a window. Put your shadow hand on the glowing circle beside the candle
+  // (the side the wind comes from) to block it. The first gust waits for you (tutorial).
+  // A missed gust only shrinks the candle; the wind never fully blows it out.
+  windStart() {
+    this.say('A STORM IS COMING!', 2);
+    this.gusts = []; const sides = this.auto ? ['L', 'R', 'L'] : ['L', 'R', 'L', 'R', 'R', 'L', 'R', 'L'];
+    let t = 2.2;
+    sides.forEach((s, i) => { this.gusts.push({ t, side: s, state: 'wait', teach: i === 0 && !this.auto }); t += Math.max(1.5, 2.6 - i * 0.14); });
+    this.windT = 0; this.windEnd = t + 0.8;
+    this.shieldTxt = addText(this, 0, 0, 'PUT YOUR\nHAND HERE', 8, '#ffd27a', { align: 'center', lineSpacing: 4 }).setOrigin(0.5).setDepth(12).setVisible(false).setShadow(0, 0, '#000', 6, true, true);
+    this.time.delayedCall(6500, () => { if (this.state === 'play') { this.spawnEntry(['snuffer', 'T', 0]); this.spawnEntry(['wisp', 'R', 260]); } });
+    this.time.delayedCall(12500, () => { if (this.state === 'play' && !this.auto) { this.spawnEntry(['snuffer', 'L', 160]); this.spawnEntry(['wisp', 'L', 300]); } });
+  }
+  shieldPoint(side) { const cp = this.candlePos; return { x: cp.x + (side === 'L' ? -55 : 55), y: cp.y - 10 }; }
+  shielded(side) {
+    if (!this.canUseHand()) return false;
+    const p = this.shieldPoint(side), cp = this.candlePos, hx = this.hand.x - cp.x;
+    return Math.hypot(this.hand.x - p.x, this.hand.y - p.y) < 115 && (side === 'L' ? hx < 15 : hx > -15);
+  }
+  updateWind(dt) {
+    const cp = this.candlePos;
+    const teaching = this.gusts.find(g => g.teach && g.state === 'warn');
+    if (teaching) {                       // tutorial gust: wait until the hand is in place
+      if (!teaching.prompted) { teaching.prompted = true; this.say('MOVE YOUR SHADOW HAND\nONTO THE GLOWING CIRCLE!', 60); }
+      if (this.shielded(teaching.side)) { teaching.held = (teaching.held || 0) + dt; if (teaching.held > 0.35) { teaching.teach = false; this.windT = teaching.t; } }
+      else teaching.held = 0;
+      teaching.waitT = (teaching.waitT || 0) + dt;
+      if (teaching.waitT > 12 && teaching.teach) { teaching.teach = false; this.windT = teaching.t; }   // never get stuck here
+    } else this.windT += dt;
+    for (const g of this.gusts) {
+      if (g.state === 'wait' && this.windT >= g.t - 1.2) { g.state = 'warn'; Sfx.windup(); }
+      if (g.state === 'warn' && !g.teach && this.windT >= g.t) {
+        g.state = 'blow'; Sfx.wind();
+        const fromL = g.side === 'L';
+        this.windFx.speedX = fromL ? { min: 700, max: 1100 } : { min: -1100, max: -700 };
+        for (let i = 0; i < 45; i++) this.windFx.emitParticleAt(fromL ? -10 : W + 10, 80 + Math.random() * 380);
+        if (this.shielded(g.side)) {
+          this.score += 250; this.popup(this.hand.x, this.hand.y - 34, g.prompted ? 'BLOCKED! JUST LIKE THAT!' : 'BLOCKED! +250', '#ffd27a');
+          if (g.prompted) this.say('NOW KEEP BLOCKING THE GUSTS!', 2.5);
+          this.goldFx.explode(24, this.hand.x, this.hand.y); Sfx.clash(); this.cameras.main.shake(120, 0.006);
+        } else {
+          this.wax = Math.max(18, this.wax - 12); this.flick = 0.8; this.hits++;
+          this.popup(cp.x, cp.y - 34, 'MISSED! THE FLAME SHRINKS', '#9fe8ff'); this.blueFx.explode(16, cp.x, cp.y); Sfx.snuff();
+          this.cameras.main.shake(200, 0.01);
+        }
+        for (const m of this.monsters) if (m.alive && !m.held) m.vx += (fromL ? 1 : -1) * 500;
+        g.blowT = 0.5;
+      }
+      if (g.state === 'blow') { g.blowT -= dt; if (g.blowT <= 0) g.state = 'done'; }
+    }
+    if (this.windT >= this.windEnd && !this.monsters.some(m => m.alive) && this.state === 'play') { this.big('THE STORM PASSES.', '#ffffff', 14, 1.0, 140); if (this.shieldTxt) this.shieldTxt.setVisible(false); this.roomClear(); }
+  }
+  drawWind(time) {
+    const g = this.curtG; if (!g) return; g.clear();
+    const eg = this.fxG;
+    let showTarget = null;
+    for (const side of ['L', 'R']) {
+      const active = this.gusts && this.gusts.find(x => x.side === side && (x.state === 'warn' || x.state === 'blow'));
+      const flap = active ? Math.sin(time * (active.state === 'blow' ? 0.06 : 0.03)) * (active.state === 'blow' ? 40 : 14) : Math.sin(time * 0.002) * 3;
+      const x = side === 'L' ? 40 : W - 150, dir = side === 'L' ? 1 : -1;
+      g.fillStyle(0x5a2a3a, 0.9);
+      g.fillPoints([{ x: x - 6, y: 140 }, { x: x + 40, y: 140 }, { x: x + 40 + flap * dir * 1.5, y: 310 }, { x: x - 6 + flap * dir, y: 310 }], true);
+      g.fillPoints([{ x: x + 76, y: 140 }, { x: x + 122, y: 140 }, { x: x + 122 + flap * dir, y: 310 }, { x: x + 76 + flap * dir * 1.5, y: 310 }], true);
+      if (active && active.state === 'warn') {
+        showTarget = side;
+        const a = 0.55 + 0.45 * Math.sin(time * 0.02);
+        eg.fillStyle(0xd8e8ff, a);                                  // big wind arrows coming from the window
+        const ax = side === 'L' ? 200 : W - 200;
+        for (let i = 0; i < 3; i++) { const ox = ax + dir * i * 34; eg.fillTriangle(ox, 190, ox, 250, ox + dir * 30, 220); }
+      }
+    }
+    // the glowing target where the hand must go
+    if (showTarget && this.state === 'play') {
+      const p = this.shieldPoint(showTarget), ok = this.shielded(showTarget), a = 0.6 + 0.4 * Math.sin(time * 0.025);
+      eg.lineStyle(4, ok ? 0x7fffa0 : 0xffd27a, a); eg.strokeCircle(p.x, p.y, 40);
+      eg.fillStyle(ok ? 0x7fffa0 : 0xffd27a, 0.15 * a); eg.fillCircle(p.x, p.y, 40);
+      this.shieldTxt.setPosition(p.x, p.y - 64).setText(ok ? 'GOOD! HOLD IT' : 'PUT YOUR\nHAND HERE').setColor(ok ? '#7fffa0' : '#ffd27a').setVisible(true);
+    } else if (this.shieldTxt) this.shieldTxt.setVisible(false);
+  }
+
+  // ================= room: THE CHASE =================
+  startChase() {
+    this.mode = 'chase';
+    this.chase = { x: this.kid.x - 320, spawnT: 1.0 };
+    Sfx.roar(); this.cameras.main.shake(600, 0.012);
+    this.say('THE DARK IS COMING.\nRUN!! CLEAR THE WAY!', 2.5);
+  }
+  updateChase(dt) {
+    const ch = this.chase, k = this.kid;
+    const gap = k.x - ch.x;
+    ch.x += (TUNE.chaseSpeed + Math.max(0, gap - 250) * 0.5) * dt;
+    ch.spawnT -= dt;
+    if (ch.spawnT <= 0 && k.x < this.doorX - 350) {
+      ch.spawnT = 1.0 + Math.random() * 0.5;
+      const r = Math.random(), cx = this.cameras.main.scrollX;
+      if (r < 0.22) this.spawnMonster('brute', cx + W + 20, 0);
+      else if (r < 0.4) this.spawnEntry({ conga: 'R', n: 4, type: 'wisp', y: FLOOR - 40 });
+      else if (r < 0.55) this.spawnMonster('snuffer', cx + W + 20, FLOOR - 230);
+      else { this.spawnMonster('wisp', cx + W + 20, FLOOR - 60 - Math.random() * 150); this.spawnMonster('wisp', cx + W + 70, FLOOR - 80 - Math.random() * 150); }
+    }
+    for (const m of this.monsters) if (m.alive && !m.held && m.x < ch.x + 20) this.killMonster(m, 'quiet');
+    if (ch.x > k.x - 18) this.fail('THE DARK CAUGHT HIM...');
+  }
+  drawChase(time) {
+    const g = this.chaseG; g.clear();
+    if (!this.chase) return;
+    const x = this.chase.x;
+    g.fillStyle(0x020106, 1); g.fillRect(x - 900, 0, 900, H);
+    for (let i = 0; i < 14; i++) {
+      const yy = 30 + i * 36, w = 40 + Math.sin(time * 0.004 + i * 1.7) * 30;
+      g.fillStyle(0x020106, 0.9); g.fillCircle(x + w * 0.5, yy, 34 + Math.sin(time * 0.005 + i) * 8);
+      g.fillStyle(0x020106, 0.5); g.fillCircle(x + w, yy + 10, 26);
+    }
+    for (let i = 0; i < 12; i++) {
+      const ex = x - 30 - (i * 53) % 260, ey = 60 + (i * 97) % 380;
+      if (Math.sin(time * 0.003 + i * 2) > -0.8) { g.fillStyle(i % 3 ? 0xffe066 : 0xff3344); g.fillTriangle(ex - 9, ey - 3, ex - 2, ey, ex - 8, ey + 3); g.fillTriangle(ex + 9, ey - 3, ex + 2, ey, ex + 8, ey + 3); }
+    }
+  }
+
+  // ================= room: LIGHTS OUT =================
+  darkStart() {
+    this.state = 'cut'; this.setBars(true);
+    this.cut([
+      [0.5, () => { Sfx.wind(); this.flick = 1.4; this.say('...WHAT WAS THAT?', 1.5); }],
+      [1.0, () => { this.lit = false; this.smokeFx.explode(20, this.candlePos.x, this.candlePos.y); Sfx.snuff(); this.cameras.main.shake(300, 0.01); this.tweens.add({ targets: this, shadowA: 0, duration: 900 }); }],
+      [0.8, () => this.big("HE CAN'T SEE YOU ANYMORE.", '#c9a8ff', 15, 1.6)],
+      [1.8, () => { this.enterDark(); this.setBars(false); this.state = 'play'; this.say("A / D: GUIDE MILO TO THE MATCHES.\nDON'T LET THEM TOUCH HIM.", 4); }],
+    ]);
+  }
+  enterDark() {
+    this.mode = 'dark'; this.lit = false; this.shadowA = 0; this.g = 0;
+    this.watchers = [];
+    for (let x = this.kid.x + 200; x < this.R.matchX - 80; x += 130 + Math.random() * 40)
+      this.watchers.push({ x, y: FLOOR - 40 - Math.random() * 110, bx: x, by: 0, wind: 0, lunge: 0, alive: true, seed: Math.random() * 10, vx: 0, vy: 0 });
+    for (const w of this.watchers) w.by = w.y;
+  }
+  updateDark(dt, time) {
+    const k = this.kid, K = this.keys;
+    const dir = ((K.D.isDown || K.RIGHT.isDown) ? 1 : 0) - ((K.A.isDown || K.LEFT.isDown) ? 1 : 0);
+    k.moving = dir !== 0;
+    if (dir) { k.face = dir; k.x = Phaser.Math.Clamp(k.x + dir * TUNE.darkSpeed * dt, 40, this.R.matchX + 10); k.walk += dt * 8; k.stepT -= dt; if (k.stepT <= 0) { k.stepT = 0.4; Sfx.step(); } }
+    this.heartT -= dt;
+    const danger = this.watchers.some(w => w.alive && (w.wind || w.lunge));
+    if (this.heartT <= 0) { this.heartT = danger ? 0.4 : 0.8; Sfx.heart(); }
+    const kx = k.x, ky = FLOOR - 32;
+    for (const w of this.watchers) {
+      if (!w.alive || this.timeStop > 0) continue;
+      if (!w.wind && !w.lunge) {
+        w.x = w.bx + Math.sin(time * 0.001 + w.seed) * 18; w.y = w.by + Math.cos(time * 0.0013 + w.seed) * 10;
+        if (Math.abs(w.x - kx) < 100) { w.wind = 0.75; w.tx = kx; w.ty = ky; Sfx.hiss(); }
+      } else if (w.wind) {
+        w.wind -= dt;
+        if (w.wind <= 0) { w.wind = 0; const dx = w.tx - w.x, dy = w.ty - w.y, dd = Math.hypot(dx, dy) || 1; w.lunge = dd / 420 + 0.03; w.vx = dx / dd * 420; w.vy = dy / dd * 420; }   // stops where it aimed
+      } else {
+        w.lunge -= dt; w.x += w.vx * dt; w.y += w.vy * dt;
+        if (Math.hypot(w.x - kx, w.y - ky) < 26 && k.invuln <= 0) { w.alive = false; Sfx.scare(); this.cameras.main.flash(250, 255, 255, 255); this.hurtKid(); }
+        if (w.lunge <= 0) { w.alive = false; this.smokeFx.explode(10, w.x, w.y); }
+      }
+    }
+    if (k.x >= this.R.matchX - 4 && this.state === 'play') this.relight();
+  }
+  relight() {
+    this.state = 'cut'; this.setBars(true); this.kid.moving = false; this.kid.face = 1; this.watchers = [];
+    const cp = () => this.candlePos;
+    this.cut([
+      [0.3, () => Sfx.scratch()],
+      [0.35, () => Sfx.scratch()],
+      [0.35, () => { Sfx.ignite(); this.lit = true; this.fireFx.explode(40, cp().x, cp().y); this.matchG.clear(); this.matchLight.a = 0; this.cameras.main.flash(300, 255, 200, 120); }],
+      [0.7, () => {
+        Sfx.rage(); this.cameras.main.shake(900, 0.022); this.goldFx.explode(90, this.kid.x, FLOOR - 150);
+        this.tweens.add({ targets: this, shadowA: 1, duration: 500 });
+        this.big('SHADE IS BACK.', '#ffd27a', 30, 1.5); Music.play('chase'); this.mode = 'normal';
+      }],
+      [1.4, () => {
+        this.setBars(false); this.rage = 9; this.state = 'play';
+        this.say("RAGE MODE! EVERYTHING IS STRONGER.\nWIPE THEM OUT!", 2.5);
+        const horde = [['wisp', 'R', 260], ['wisp', 'L', 300], ['brute', 'R', 0], ['wisp', 'R', 180], { conga: 'L', n: 4, type: 'wisp', y: FLOOR - 40 }, ['snuffer', 'T', 0], ['brute', 'L', 0], ['wisp', 'T', 0], ['wisp', 'R', 340], ['wisp', 'L', 160]];
+        if (this.auto) horde.length = 7;
+        this.rageHorde = horde.length;
+        horde.forEach((e, i) => this.time.delayedCall(i * 220, () => { if (this.state === 'play') this.spawnEntry(e); this.rageHorde--; }));
+      }],
+    ]);
+  }
+
+  // ================= room: THE HOLLOW =================
+  setupBoss() {
+    this.boss = { x: 700, S: 13, slump: 0, hp: 14, max: 14, phase: 1, stun: 0, atkT: 3, sumT: 2.5, flash: 0, defeated: false, gone: false, shrink: 1, alpha: 0.95,
+      hand: { x: 560, y: 250, st: 'idle', t: 0, tx: 0, ang: Math.PI } };
+    if (this.auto) { this.boss.hp = 7; this.boss.phase = 2; }
+    this.bossBar = this.add.graphics().setScrollFactor(0).setDepth(10);
+    this.hudItems.push(this.bossBar);
+    this.parryLbl = addText(this, 0, 0, 'PARRY HERE', 9, '#ffd27a').setOrigin(0.5).setDepth(9).setShadow(0, 0, '#000', 6, true, true).setVisible(false);
+    this.heartLbl = addText(this, 0, 0, 'HIT THE HEART!', 10, '#ffffff').setOrigin(0.5).setDepth(9).setShadow(0, 0, '#000', 6, true, true).setVisible(false);
+    this.bossName = addText(this, W / 2, 52, 'THE HOLLOW', 10, '#ff6a8a').setOrigin(0.5, 0).setScrollFactor(0).setDepth(11);
+    this.hudItems.push(this.bossName);
+    if (this.trailer) { this.bossBar.setVisible(false); this.bossName.setVisible(false); }
+  }
+  bossIntro() {
+    this.state = 'cut'; this.setBars(true);
+    this.cut([
+      [0.2, () => { Sfx.roar(); this.cameras.main.shake(1000, 0.022); }],
+      [0.6, () => { this.state = 'play'; this.freezeFrame(() => ({ x: this.boss.x, y: 180 }), 'THE HOLLOW', 'A SHADOW WITH\nNO ONE LEFT TO PROTECT.', '#ff6a8a'); }],
+      [1.9, () => { this.setBars(false); this.state = 'play'; this.say('WHEN ITS HAND SLAMS DOWN...\nPUT YOUR HAND THERE TO PARRY!', 4); }],
+    ]);
+  }
+  bossX() { return this.boss.x - 240 * this.boss.slump; }
+  bossCore() { const b = this.boss; return drawShadowBody(NULL_G, this.bossX(), b.S * (1 - 0.18 * b.slump), this.time.now, 0, 1, 0.08).chest; }
+  bossDamage(n, how) {
+    const b = this.boss; if (b.defeated || b.hp <= 0) return;
+    b.hp = Math.max(0, b.hp - n); b.flash = 0.2;
+    const c = this.bossCore();
+    this.goldFx.explode(30, c.x, c.y); Sfx.impact();
+    this.cameras.main.shake(300, 0.018); this.stopT = Math.max(this.stopT, 0.09); this.punch = 0.06;
+    this.score += 500 * n; this.popup(c.x, c.y - 40, ({ wolf: 'WOLF BITE! ', raven: 'PECK! ', throw: 'DIRECT HIT! ' }[how] || 'CORE HIT! ') + '+' + 500 * n, '#ff6a8a');
+    const newPhase = b.hp <= 4 ? 3 : b.hp <= 9 ? 2 : 1;
+    if (newPhase > b.phase && b.hp > 0) {
+      b.phase = newPhase; b.stun = 0; b.hand.st = 'idle';
+      Sfx.roar(); this.cameras.main.shake(800, 0.02);
+      this.big(newPhase === 2 ? "IT'S ANGRY." : 'LAST CHANCE.', '#ff6a8a', 22, 1.2);
+    }
+    if (b.hp <= 0) this.startQTE();
+  }
+  smashBoss() {
+    const b = this.boss; if (!b || b.defeated || b.stun <= 0) return;
+    const c = this.bossCore();
+    if (Math.hypot(this.hand.x - c.x, this.hand.y - c.y) < this.handR + 60) this.bossDamage(2, 'smash');
+  }
+  startQTE() {
+    const b = this.boss;
+    this.state = 'qte'; b.stun = 5; this.held = null;
+    for (const m of this.monsters) if (m.alive) this.killMonster(m, 'quiet');
+    this.qte = { n: 0, need: 12, t: 4.5 };
+    this.slowTint.setAlpha(0.18); Sfx.slow();
+    this.qteTxt = addText(this, W / 2, H / 2 - 110, 'CALM IT!\nMASH CLICK / SPACE', 20, '#ffd27a', { align: 'center', lineSpacing: 12 }).setOrigin(0.5).setScrollFactor(0).setDepth(16).setShadow(0, 0, '#000', 10, true, true);
+  }
+  qteHit() {
+    if (!this.qte) return;
+    this.qte.n++; Sfx.combo(this.qte.n); this.cameras.main.shake(80, 0.006);
+    const c = this.bossCore(); this.goldFx.explode(8, c.x, c.y);
+    this.qteTxt.setScale(1.15); this.tweens.add({ targets: this.qteTxt, scale: 1, duration: 100 });
+    if (this.qte.n >= this.qte.need) { this.qteTxt.destroy(); this.qte = null; this.slowTint.setAlpha(0); this.finisher(); }
+  }
+  updateQTE(dt) {
+    const q = this.qte; if (!q) return;
+    q.t -= dt;
+    if (q.t <= 0) {
+      this.qteTxt.destroy(); this.qte = null; this.slowTint.setAlpha(0);
+      this.boss.hp = 3; this.boss.stun = 0; this.boss.hand.st = 'idle'; this.state = 'play';
+      this.big("IT'S NOT OVER!", '#ff6a8a', 20, 1.2);
+    }
+  }
+  updateBoss(dt, time) {
+    const b = this.boss, hd = b.hand, k = this.kid;
+    if (b.defeated) return;
+    b.flash = Math.max(0, b.flash - dt);
+    if (b.stun > 0) b.stun -= dt;
+    b.slump += ((b.stun > 0.3 ? 1 : 0) - b.slump) * Math.min(1, dt * (b.stun > 0.3 ? 7 : 3));
+    const sh = drawShadowBody(NULL_G, this.bossX(), b.S, time, 0, 1, 0.08).shoulder;
+    b.atkT -= dt;
+    if (hd.st === 'idle') {
+      const tx = sh.x - 110, ty = sh.y + 30 + Math.sin(time * 0.002) * 20;
+      hd.x += (tx - hd.x) * Math.min(1, dt * 4); hd.y += (ty - hd.y) * Math.min(1, dt * 4); hd.ang = Math.PI * 0.85;
+      if (b.atkT <= 0 && b.stun <= 0) { hd.st = 'raise'; hd.t = 0.65; hd.tx = k.x + (Math.random() - 0.5) * 60; Sfx.hiss(); }
+    } else if (hd.st === 'raise') {
+      hd.t -= dt; hd.x += (hd.tx - hd.x) * Math.min(1, dt * 6); hd.y += ((FLOOR - 300) - hd.y) * Math.min(1, dt * 6); hd.ang = Math.PI / 2;
+      if (hd.t <= 0) { hd.st = 'aim'; hd.t = [0.75, 0.6, 0.5][b.phase - 1]; }
+    } else if (hd.st === 'aim') {
+      hd.t -= dt; hd.x += (hd.tx - hd.x) * Math.min(1, dt * 6);
+      if (hd.t <= 0) { hd.st = 'slam'; hd.t = 0.12; }
+    } else if (hd.st === 'slam') {
+      hd.t -= dt; hd.y += ((FLOOR - 30) - hd.y) * Math.min(1, dt * 30);
+      if (hd.t <= 0) {
+        hd.y = FLOOR - 30;
+        const parry = Math.hypot(this.hand.x - hd.x, this.hand.y - (FLOOR - 70)) < this.handR + 60 && this.canUseHand() && this.form === 'hand';
+        if (parry) {
+          Sfx.clash(); this.cameras.main.flash(200, 255, 255, 255); this.cameras.main.shake(400, 0.022);
+          this.goldFx.explode(50, hd.x, FLOOR - 60); this.stopT = 0.12; this.slowmo(0.8);
+          b.stun = 3.2; hd.st = 'recover'; hd.t = 1.2;
+          this.big('PERFECT PARRY!', '#ffd27a', 24, 0.7); this.score += 300; this.popup(hd.x, FLOOR - 120, '+300', '#ffd27a');
+          this.say('ITS HEART IS OPEN!\nSMASH IT - OR SEND THE WOLF!', 2.2);
+        } else {
+          Sfx.slam(); this.cameras.main.shake(350, 0.018); this.smokeFx.explode(30, hd.x, FLOOR - 10);
+          if (Math.abs(k.x - hd.x) < 60) this.hurtKid();
+          this.missedParry++;
+          hd.st = 'recover'; hd.t = 0.7;
+        }
+        b.atkT = [3.2, 2.6, 2.0][b.phase - 1];
+      }
+    } else if (hd.st === 'recover') {
+      hd.t -= dt; hd.y -= 120 * dt;
+      if (hd.t <= 0) hd.st = 'idle';
+    }
+    b.sumT -= dt;
+    if (b.sumT <= 0 && b.stun <= 0) {
+      b.sumT = [5.5, 4.8, 4.2][b.phase - 1];
+      if (this.monsters.filter(m => m.alive).length < 6) {
+        const c = this.bossCore();
+        this.spawnMonster('wisp', c.x - 40, c.y - 40); this.spawnMonster('wisp', c.x - 60, c.y + 40);
+        if (b.phase >= 2) this.spawnMonster(b.phase === 3 ? 'brute' : 'snuffer', c.x - 80, b.phase === 3 ? 0 : 160);
+      }
+    }
+    const c = this.bossCore();
+    for (const m of this.monsters) if (m.alive && m.thrown && Math.hypot(m.x - c.x, m.y - c.y) < 70) { this.impact(m.x, m.y, m); this.bossDamage(1, 'throw'); if (this.state !== 'play') break; }
+  }
+  drawBoss(time) {
+    const b = this.boss, g = this.hollowG; g.clear();
+    const bb = this.bossBar; bb.clear();
+    if (b.gone) return;
+    const S = b.S * (1 - 0.18 * b.slump) * (b.defeated ? b.shrink : 1);
+    const col = b.flash > 0 ? 0x3a2a4a : 0x030208;
+    const pose = drawShadowBody(g, this.bossX(), S, time, 0, b.defeated ? b.alpha : 0.95, 0.08, col, b.defeated ? 0 : 0.18);
+    const h = pose.head;
+    g.fillStyle(0xffffff, (b.defeated ? b.alpha : 1) * (b.stun > 0 ? 0.5 : 1));
+    if (b.defeated) { g.fillEllipse(h.x - 2.4 * S, h.y + 0.6 * S, 1.6 * S, 1 * S); g.fillEllipse(h.x + 2.4 * S, h.y + 0.6 * S, 1.6 * S, 1 * S); }
+    else { g.fillEllipse(h.x - 2.6 * S, h.y, 1.6 * S, 2.4 * S); g.fillEllipse(h.x + 2.6 * S, h.y, 1.6 * S, 2.4 * S); }
+    const core = pose.chest, open = b.stun > 0, fa = b.defeated ? b.alpha : 1;
+    g.fillStyle(0xff6a8a, (open ? 0.5 : 0.15) * fa); g.fillCircle(core.x, core.y, (open ? 3.2 : 2) * S);
+    g.fillStyle(open ? 0xffffff : 0xff6a8a, (open ? 0.9 : 0.35 + 0.15 * Math.sin(time * 0.006)) * fa); g.fillCircle(core.x, core.y, (open ? 1.6 : 1.1) * S);
+    if (open && !b.defeated) { g.lineStyle(3, 0xffd27a, 0.6 + 0.4 * Math.sin(time * 0.03)); g.strokeCircle(core.x, core.y, 3.8 * S); }
+    if (b.defeated) return;
+    const hd = b.hand;
+    drawArm(g, pose.shoulder, hd, S * 0.9, 0.92, col);
+    drawClaw(g, hd.x, hd.y, 6 * S * 0.9, hd.ang, hd.st === 'slam', 0.95, col);
+    if (hd.st === 'aim' || hd.st === 'raise') {
+      const a = hd.st === 'aim' ? 0.5 + 0.5 * Math.sin(time * 0.05) : 0.3;
+      this.fxG.lineStyle(3, 0xff3344, a); this.fxG.strokeEllipse(hd.tx, FLOOR - 4, 120, 22);
+      this.fxG.fillStyle(0xff3344, a * 0.25); this.fxG.fillEllipse(hd.tx, FLOOR - 4, 120, 22);
+      this.fxG.fillStyle(0xffd27a, a); this.fxG.fillCircle(hd.tx, FLOOR - 70, 6);
+      if (!this.auto && !this.trailer) {
+        this.parryLbl.setPosition(hd.tx, FLOOR - 128).setVisible(true).setAlpha(0.6 + 0.4 * a);
+        this.fxG.fillStyle(0xffd27a, a); this.fxG.fillTriangle(hd.tx - 8, FLOOR - 112, hd.tx + 8, FLOOR - 112, hd.tx, FLOOR - 98);
+      }
+    } else this.parryLbl.setVisible(false);
+    if (b.stun > 0 && !this.auto && !this.trailer) {
+      const S2 = b.S * (1 - 0.18 * b.slump), core = drawShadowBody(NULL_G, this.bossX(), S2, time, 0, 1, 0.08).chest;
+      this.heartLbl.setPosition(core.x, core.y - 4.6 * S2).setVisible(true).setScale(1 + 0.08 * Math.sin(time * 0.02));
+    } else this.heartLbl.setVisible(false);
+    if (this.trailer) return;
+    bb.fillStyle(0x1a1428, 0.9); bb.fillRect(W / 2 - 152, 68, 304, 12);
+    bb.fillStyle(0xff6a8a); bb.fillRect(W / 2 - 150, 70, 300 * Math.max(0, b.hp) / b.max, 8);
+    bb.fillStyle(0xffffff, 0.4); bb.fillRect(W / 2 - 150 + 300 * 9 / 14, 68, 2, 12); bb.fillRect(W / 2 - 150 + 300 * 4 / 14, 68, 2, 12);
+  }
+  finisher() {
+    const b = this.boss;
+    b.defeated = true; b.shrink = 1; b.alpha = 0.95; b.stun = 0;
+    if (this.parryLbl) { this.parryLbl.setVisible(false); this.heartLbl.setVisible(false); }
+    this.tweens.add({ targets: b, slump: 0, duration: 1200 });
+    this.state = 'cut'; this.setBars(true); this.slowmo(1.5);
+    this.registry.set('score', this.score + 5000); this.score += 5000; this.registry.set('best', this.bestCombo);
+    const rs = this.registry.get('ratings') || []; rs[this.ri] = this.hits === 0 ? 'S' : this.hits <= 1 ? 'A' : 'B'; this.registry.set('ratings', rs);
+    Music.stop();
+    const line = (t, c = '#ffffff') => { const o = addText(this, W / 2, 110, t, 12, c, { align: 'center', lineSpacing: 10 }).setOrigin(0.5).setScrollFactor(0).setDepth(21).setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 400 }); this.time.delayedCall(2300, () => this.tweens.add({ targets: o, alpha: 0, duration: 400, onComplete: () => o.destroy() })); };
+    this.cut([
+      [0.05, () => { Sfx.roar(); this.cameras.main.flash(600, 255, 255, 255); this.cameras.main.shake(1200, 0.025); const c = this.bossCore(); this.goldFx.explode(120, c.x, c.y); this.big('+5000  FINISHER', '#ffd27a', 18, 1.2, 150); }],
+      [1.6, () => { this.tweens.add({ targets: b, shrink: 0.7, duration: 1200 }); Music.play('title'); }],
+      [1.0, () => line('...I HAD A CHILD ONCE.\nSHE GREW UP. SHE STOPPED NEEDING ME.', '#ff9ab0')],
+      [2.8, () => { line("I'VE BEEN LOOKING FOR A LIGHT EVER SINCE.", '#ff9ab0'); this.kidWalkTo = b.x - 150; }],
+      [2.8, () => { this.giftCandle = true; Sfx.candle(); this.fireFx.explode(30, b.x - 120, FLOOR - 30); line('"YOU CAN HAVE MY CANDLE."', '#8fb0f0'); this.tweens.add({ targets: b, shrink: 0.18, duration: 1800, ease: 'Cubic.easeInOut' }); }],
+      [2.6, () => { line('"THANK YOU."'); this.goldFx.explode(60, b.x, FLOOR - 40); this.tweens.add({ targets: b, alpha: 0, duration: 1200, onComplete: () => { b.gone = true; } }); }],
+      [2.2, () => this.cameras.main.fadeOut(1300, 255, 240, 220)],
+      [1.4, () => this.scene.start('Ending')],
+    ]);
+  }
+
+  // ================= main loop =================
+  update(time, dtMs) {
+    if (this.paused) return;
+    const rdt = Math.min(dtMs / 1000, 1 / 30);
+    this.slowT = Math.max(0, this.slowT - rdt);
+    const dt = rdt * (this.slowT > 0 ? 0.25 : 1) * (this.state === 'qte' ? 0.3 : 1);
+    const k = this.kid, cam = this.cameras.main, ptr = this.input.activePointer, R = this.R;
+    if (this.registry.get('autoplay')) autoBot(this);
+
+    const wantGiant = this.rage > 0 || (this.state === 'play' && this.mode !== 'dark' && (ptr.rightButtonDown() || this.keys.SPACE.isDown || this.keys.SHIFT.isDown));
+    const wasGiant = this.g > 0.5;
+    this.g += ((wantGiant ? 1 : 0) - this.g) * Math.min(1, rdt * 12);
+    if (!wasGiant && this.g > 0.5) { Sfx.grow(); this.punch = Math.min(0.06, this.punch + 0.03); }
+    const S = this.S, lightR = this.lightR, cp = this.candlePos;
+
+    if (R.type === 'chase' || R.type === 'dark') {
+      const targetX = Phaser.Math.Clamp(k.x - (this.mode === 'chase' ? 300 : 330), 0, this.WORLD - W);
+      cam.scrollX += (targetX - cam.scrollX) * Math.min(1, rdt * 5);
+    }
+    this.punch *= 0.86; cam.setZoom(1 + this.punch + (this.slowT > 0 ? 0.05 : 0));
+    this.slowTint.setAlpha(this.state === 'qte' ? 0.18 : this.slowT > 0 ? 0.12 : 0);
+    k.blinkT -= rdt; if (k.blinkT < -0.12) k.blinkT = 2 + Math.random() * 3;
+
+    if (this.stopT > 0) { this.stopT -= rdt; this.render(time, rdt, S, lightR, cp); return; }
+
+    // scripted walking (room entry / boss ending) and exit run
+    if (this.kidWalkTo !== undefined) {
+      if (Math.abs(k.x - this.kidWalkTo) > 3) { k.x += Math.sign(this.kidWalkTo - k.x) * (this.state === 'cut' && R.type === 'boss' && this.boss.defeated ? 50 : TUNE.runSpeed) * rdt; k.walk += rdt * 10; k.moving = true; k.face = Math.sign(this.kidWalkTo - k.x) || 1; }
+      else { this.kidWalkTo = undefined; k.moving = false; }
+    } else if (this.state === 'exit') { k.x += TUNE.runSpeed * 1.3 * rdt; k.walk += rdt * 12; k.moving = true; k.face = 1; }
+    else if (this.state !== 'play') k.moving = false;
+
+    if (this.state === 'qte') this.updateQTE(rdt);
+
+    if (this.timeStop > 0) {
+      this.timeStop = Math.max(0, this.timeStop - rdt);
+      this.tickT -= rdt; if (this.tickT <= 0 && this.timeStop > 0) { this.tickT = 0.5; Sfx.tick(); }
+      if (this.timeStop === 0) Sfx.timego();
+    }
+    this.stopCool = Math.max(0, this.stopCool - rdt);
+    const frozen = this.timeStop > 0;
+    Music.setIntensity(this.combo >= 12 ? 2 : this.combo >= 5 ? 1 : 0);
+    if (k.hop > 0) k.hop = Math.max(0, k.hop - rdt);
+    // embers fly into the candle
+    for (const s of this.sparks) {
+      s.t += rdt; const c = this.candlePos;
+      if (s.t < 0.25) { s.vy += 600 * rdt; } else { const dx = c.x - s.x, dy = c.y - s.y, d = Math.hypot(dx, dy) || 1; s.vx += (dx / d * 900 - s.vx) * Math.min(1, rdt * 8); s.vy += (dy / d * 900 - s.vy) * Math.min(1, rdt * 8); if (d < 14) { s.done = true; this.wax = Math.min(TUNE.waxMax, this.wax + s.wax); Sfx.ember(); } }
+      s.x += s.vx * rdt; s.y += s.vy * rdt;
+    }
+    this.sparks = this.sparks.filter(s => !s.done && s.t < 3);
+    // lightning through the windows
+    if (this.lights.some(L => L.win)) {
+      this.boltT -= rdt; this.bolt = Math.max(0, this.bolt - rdt * 3);
+      if (this.boltT <= 0) { this.boltT = 9 + Math.random() * 8; this.bolt = 1; cam.flash(90, 170, 180, 255); this.time.delayedCall(450 + Math.random() * 500, () => Sfx.thunder()); }
+    }
+    if (this.state === 'play') {
+      if (!frozen) this.roomT += dt;
+      this.checkHints(rdt);
+      this.cool = Math.max(0, this.cool - dt);
+      k.invuln = Math.max(0, k.invuln - dt);
+      this.comboT = Math.max(0, this.comboT - dt); if (this.comboT === 0) this.combo = 0;
+      this.flick = Math.max(0, this.flick - dt);
+      if (this.rage > 0) { this.rage -= dt; if (this.rage <= 0) { this.say('THE RAGE FADES...', 1.2); } }
+
+      if (this.mode !== 'dark' && R.type !== 'wind') {
+        this.wax -= dt * 0.5 * (1 + (TUNE.giantBurn - 1) * this.g) * (this.rage > 0 || frozen ? 0 : 1);
+        if (this.wax <= 0) { this.wax = 0; this.fail('THE CANDLE WENT OUT...'); }
+      }
+
+      if (R.type === 'fight' && this.pending <= 0 && !this.monsters.some(m => m.alive)) {
+        this.waveGap += dt; if (this.waveGap > 0.7) { this.waveGap = 0; this.nextWave(); }
+      }
+      if (R.type === 'wind' && !frozen) this.updateWind(dt);
+      if (R.type === 'dark' && this.mode === 'dark') this.updateDark(dt, time);
+      if (R.type === 'dark' && this.mode === 'normal' && this.rageHorde === 0 && !this.monsters.some(m => m.alive) && this.lit) { this.slowmo(1.2); this.roomClear(); }
+
+      // kid: stands in fight rooms, runs in the chase
+      if (this.mode === 'chase') {
+        const block = this.monsters.some(m => m.alive && !m.held && !m.thrown && m.x > k.x && m.x < k.x + 70 && Math.abs(m.y - (FLOOR - 32)) < 60);
+        k.scared = block; k.moving = !block;
+        if (k.moving) { k.x += TUNE.runSpeed * dt; k.walk += dt * 13; k.face = 1; k.stepT -= dt; if (k.stepT <= 0) { k.stepT = 0.22; Sfx.step(); } }
+        if (k.x >= this.doorX + 30) { this.chase = null; this.mode = 'normal'; this.roomClear(); }
+      } else if (this.mode !== 'dark') {
+        const near = this.monsters.filter(m => m.alive && !m.held).sort((a, b) => Math.abs(a.x - k.x) - Math.abs(b.x - k.x))[0];
+        k.scared = !!near && Math.abs(near.x - k.x) < 320; if (near && R.type !== 'boss') k.face = near.x < k.x ? -1 : 1;
+        if (R.type === 'boss') k.face = 1;
+      }
+      if (this.chase && this.state === 'play' && !frozen) this.updateChase(dt);
+
+      if (this.mode !== 'dark') this.updateHand(rdt, time, S);
+      this.updateForms(dt);
+      this.updateMonsters(dt, time, cp, lightR);
+      if (this.boss && this.state === 'play') {
+        if (!frozen) this.updateBoss(dt * (1 + 0.45 * Math.min(1, this.roomT / 55)), time);    // it gets faster as midnight nears
+        else { const c = this.bossCore(); for (const m of this.monsters) if (m.alive && m.thrown && Math.hypot(m.x - c.x, m.y - c.y) < 70) { this.impact(m.x, m.y, m); this.bossDamage(1, 'throw'); if (this.state !== 'play') break; } }
+      }
+    } else if (['cut', 'clear', 'exit', 'freeze', 'qte'].includes(this.state)) {
+      if (this.mode !== 'dark' && this.shadowA > 0.5) this.updateHand(rdt, time, S);
+      if (this.state === 'clear' || this.state === 'qte') this.updateForms(dt);
+    }
+
+    for (const s of this.splats) s.t -= rdt;
+    this.splats = this.splats.filter(s => s.t > 0);
+    this.render(time, rdt, S, lightR, cp);
+  }
+
+  updateHand(dt, time, S) {
+    const k = this.kid, cam = this.cameras.main, ptr = this.input.activePointer;
+    const body = this.shadowPose = drawShadowBody(NULL_G, k.x - 8 * k.face, S, time, k.walk, 1, -0.1 * k.face);
+    const wp = cam.getWorldPoint(ptr.x, ptr.y);
+    let tx = wp.x, ty = Math.min(wp.y, FLOOR - 6);
+    const reach = this.reach, sh = tx < k.x ? body.shoulder : body.shoulderR;
+    const dx = tx - sh.x, dy = ty - sh.y, d = Math.hypot(dx, dy);
+    if (d > reach) { tx = sh.x + dx / d * reach; ty = sh.y + dy / d * reach; }
+    const hd = this.hand;
+    hd.px = hd.x; hd.py = hd.y;
+    hd.x += (tx - hd.x) * Math.min(1, dt * 26); hd.y += (ty - hd.y) * Math.min(1, dt * 26);
+    hd.vx = (hd.x - hd.px) / dt; hd.vy = (hd.y - hd.py) / dt;
+    hd.hist.push([hd.vx, hd.vy]); if (hd.hist.length > 5) hd.hist.shift();
+    hd.slam = Math.max(0, hd.slam - dt);
+    hd.sh = sh;
+  }
+
+  updateMonsters(dt, time, cp, lightR) {
+    const k = this.kid, hd = this.hand, cam = this.cameras.main;
+    const fast = this.form === 'hand' && Math.hypot(hd.vx, hd.vy) > (this.rage > 0 ? 500 : 900) && this.canUseHand();
+    const handR = this.handR;
+    for (const m of this.monsters) {
+      if (!m.alive) continue;
+      m.born += dt; m.flash = Math.max(0, m.flash - dt);
+      if (m.held) { m.x = hd.x + Math.sin(time * 0.05) * 2; m.y = hd.y; continue; }
+      if (this.timeStop > 0 && !m.thrown) continue;          // frozen in time
+      if (m.thrown) {
+        m.thrown -= dt; m.vy += 900 * dt; m.x += m.vx * dt; m.y += m.vy * dt;
+        let hitO = null;
+        for (const o of this.monsters) if (o !== m && o.alive && !o.held && Math.hypot(o.x - m.x, o.y - m.y) < o.r + m.r + 4) { hitO = o; break; }
+        if (hitO && Math.hypot(m.vx, m.vy) > 200) { this.impact(m.x, m.y, m); continue; }
+        if (m.y >= FLOOR - m.r) {
+          if (Math.abs(m.vy) > 300) { this.impact(m.x, FLOOR - m.r, m); continue; }
+          m.y = FLOOR - m.r; m.vy *= -0.3; m.vx *= 0.7;
+        }
+        if (m.y < 50) { m.y = 50; m.vy = Math.abs(m.vy) * 0.5; }
+        if (m.x < cam.scrollX - 80 || m.x > cam.scrollX + W + 80) { this.killMonster(m, 'throw'); continue; }
+        if (m.thrown <= 0) m.thrown = 0;
+        continue;
+      }
+      const T = MONSTER[m.type];
+      if (m.march) {                     // marching lines walk straight at Milo
+        m.x += Math.sign(k.x - m.x) * m.sp * dt; m.y += Math.sin(time * 0.006 + m.seed) * 0.3;
+      } else {
+        const target = m.type === 'snuffer' ? { x: cp.x, y: cp.y } : { x: k.x, y: FLOOR - 32 };
+        const ddx = target.x - m.x, ddy = target.y - m.y, dd = Math.hypot(ddx, ddy) || 1;
+        const dcx = m.x - cp.x, dcy = m.y - cp.y, dc = Math.hypot(dcx, dcy) || 1;
+        let ax = 0, ay = 0;
+        if (T.lunge) {
+          m.lungeT -= dt;
+          if (m.lungeT <= 0 && !m.wind && !m.lunge && dd < 330) { m.wind = 0.45; Sfx.hiss(); }
+          if (m.wind) { m.wind -= dt; m.vx *= 0.85; m.vy *= 0.85; if (m.wind <= 0) { m.wind = 0; m.lunge = 0.7; } }
+        }
+        const repelled = m.type !== 'snuffer' && dc < lightR && !m.lunge;
+        if (m.lunge) { m.lunge -= dt; if (m.lunge <= 0) { m.lunge = 0; m.lungeT = 2 + Math.random() * 2.2; } m.vx = ddx / dd * 320; m.vy = ddy / dd * 320; }
+        else if (repelled) { ax = dcx / dc * 520; ay = dcy / dc * 520; }
+        else { ax = ddx / dd * m.sp * 2.4; ay = ddy / dd * m.sp * 2.4; }
+        if (m.type === 'brute') { ay = 0; m.vy = 0; }
+        else if (!m.lunge) ay += Math.sin(time * 0.004 + m.seed) * (m.type === 'snuffer' ? 160 : 60);
+        if (!m.lunge) { m.vx = (m.vx + ax * dt) * 0.96; m.vy = (m.vy + ay * dt) * 0.96; }
+        const sp = Math.hypot(m.vx, m.vy), max = m.lunge ? 330 : m.sp * 1.4;
+        if (sp > max && m.type !== 'brute') { m.vx *= max / sp; m.vy *= max / sp; }
+        if (m.type === 'brute') { m.vx = Phaser.Math.Clamp(m.vx, -240, 240); m.vx *= 0.97; if (Math.abs(m.vx) < m.sp && !repelled) m.vx = Math.sign(ddx) * m.sp; }
+        m.x += m.vx * dt;
+        m.y = m.type === 'brute' ? FLOOR - m.r : Phaser.Math.Clamp(m.y + m.vy * dt, 60, FLOOR - 12);
+        if (m.type === 'snuffer' && dc < 18 && this.lit) {
+          this.wax = Math.max(0, this.wax - 12); this.flick = 0.6;
+          this.popup(cp.x, cp.y - 30, '-12s CANDLE!', '#9fe8ff');
+          this.blueFx.explode(20, cp.x, cp.y); Sfx.snuff(); this.cameras.main.shake(150, 0.008);
+          m.alive = false; this.combo = 0; this.comboT = 0; continue;
+        }
+      }
+      if (fast && m.type !== 'brute' && m.born > 0.25 && Math.hypot(m.x - hd.x, m.y - hd.y) < handR + m.r) { this.killMonster(m, 'swipe'); Sfx.swoosh(); continue; }
+      if (this.rage > 0 && this.form === 'hand' && m.type === 'brute' && Math.hypot(m.x - hd.x, m.y - hd.y) < handR + m.r && Math.hypot(hd.vx, hd.vy) > 500) { this.killMonster(m, 'swipe'); continue; }
+      if (m.type !== 'snuffer' && k.invuln <= 0 && this.state === 'play' && Math.abs(m.x - k.x) < m.r + 12 && Math.abs(m.y - (FLOOR - 32)) < m.r + 28) {
+        if (m.type === 'brute') { m.vx = Math.sign(m.x - k.x || 1) * 260; m.x += Math.sign(m.x - k.x || 1) * 30; this.hurtKid(); }
+        else { this.killMonster(m, 'quiet'); this.hurtKid(); }
+      }
+    }
+    this.monsters = this.monsters.filter(m => m.alive);
+  }
+
+  render(time, dt, S, lightR, cp) {
+    const k = this.kid, cam = this.cameras.main;
+    this.fxG.clear();
+    const kg = this.kidG; kg.clear();
+    const hurt = k.invuln > 1.0;
+    const hopY = k.hop > 0 ? Math.sin((1 - k.hop / 0.6) * Math.PI * 2) * 10 : 0;
+    if (!(k.invuln > 0 && Math.floor(time / 90) % 2)) {
+      drawKid(kg, k.x, FLOOR - Math.abs(hopY), { time, walk: k.walk, moving: k.moving, run: k.moving && (this.mode === 'chase' || this.state === 'exit' || this.kidWalkTo !== undefined), face: k.face, scared: (k.scared || this.mode === 'dark') && !hurt, cry: hurt, blink: k.blinkT < 0,
+        smile: this.state === 'clear' || this.giftCandle, hand: this.giftCandle ? null : { x: cp.x, y: cp.y }, candle: this.giftCandle ? null : { x: cp.x, y: cp.y, lit: this.lit } });
+    }
+    if (this.giftCandle && this.boss) { kg.fillStyle(0xf4ead0); kg.fillRect(this.boss.x - 123, FLOOR - 14, 5, 14); kg.fillStyle(0xffb347); kg.fillEllipse(this.boss.x - 120.5, FLOOR - 19, 5, 9); }
+    this.flame.setPosition(cp.x, cp.y - 4);
+    this.flame.emitting = this.lit && !this.giftCandle;
+
+    const fl = 1 + Math.sin(time * 0.02) * 0.03 + Math.random() * 0.04;
+    const waxF = Math.max(0.35, this.wax / TUNE.waxMax), flick = this.flick > 0 ? 0.3 + Math.random() * 0.5 : 1;
+    const on = this.lit && !this.giftCandle ? 1 : 0;
+    const pulse = Music.pulse();
+    this.glowBig.setPosition(cp.x, cp.y).setScale((TUNE.lightNormal * 2.4 / 256 + 1.3) * fl * (0.6 + 0.4 * waxF) * (1 + 0.07 * pulse)).setAlpha((0.55 + 0.12 * pulse) * flick * on);
+    this.glowCore.setPosition(cp.x, cp.y).setScale(0.5 * fl).setAlpha(flick * on);
+    this.lightRing.clear();
+    if (lightR > 10) { this.lightRing.lineStyle(2, 0xffb347, 0.14 + 0.05 * Math.sin(time * 0.005)); this.lightRing.strokeCircle(cp.x, cp.y, lightR); }
+
+    const wd = this.wallDark;
+    wd.clear(); wd.fill(0x05030c, this.mode === 'dark' ? 0.95 : 0.7);
+    const erase = (x, y, r, a) => { if (a <= 0) return; this.maskImg.setScale(r * 2 / 256).setAlpha(a); wd.erase(this.maskImg, x - cam.scrollX, y); };
+    if (on) erase(cp.x, cp.y, (240 + lightR) * (0.6 + 0.4 * waxF) * fl, flick);
+    for (const L of this.lights) erase(L.x, L.y, L.r * (L.flick ? 0.9 + Math.random() * 0.2 : 1) * (L.win && this.bolt > 0 ? 1 + 2.2 * this.bolt : 1), L.win && this.bolt > 0 ? Math.min(1, L.a + this.bolt) : L.a);
+    if (this.boss && this.boss.stun > 0) { const c = this.bossCore(); erase(c.x, c.y, 170, 0.6); }
+
+    const fd = this.fullDark; fd.clear();
+    if (this.mode === 'dark' || (this.R.type === 'dark' && !this.lit && this.state === 'cut') || (this.ri === 0 && !this.lit)) {
+      fd.fill(0x000000, 0.9);
+      this.maskImg.setScale(170 / 256).setAlpha(0.85); fd.erase(this.maskImg, k.x - cam.scrollX, FLOOR - 36);
+      if (this.matchLight && this.matchLight.a > 0) { this.maskImg.setScale(190 / 256 * (0.9 + Math.random() * 0.2)).setAlpha(0.9); fd.erase(this.maskImg, this.matchLight.x - cam.scrollX, this.matchLight.y); }
+    }
+
+    const sg = this.splatG; sg.clear();
+    for (const s of this.splats) {
+      const a = Math.min(1, s.t / 1.5) * 0.55;
+      sg.fillStyle(0x1a0a30, a); sg.fillCircle(s.x, s.y, s.r);
+      for (let i = 0; i < 6; i++) { const an = s.seed + i * 1.05, l = s.r * (1.2 + (i % 3) * 0.3); sg.fillCircle(s.x + Math.cos(an) * l, s.y + Math.sin(an) * l, s.r * 0.28); }
+      sg.fillRect(s.x - 2, s.y, 4, s.r * 1.6 * (1 - s.t / 5) + 4);
+    }
+
+    // ---- SHADE ----
+    const g = this.shadowG; g.clear();
+    const formCol = this.form === 'wolf' ? 0xffb347 : this.form === 'raven' ? 0x7fe8ff : 0x6a3cff;
+    if (this.shadowA > 0.02 && !this.giftCandle) {
+      const lean = -0.1 * k.face, bx = k.x - 8 * k.face;
+      const rim = (this.rage > 0 ? 0.35 + 0.15 * Math.sin(time * 0.02) : 0.12 + (this.formFlash || 0) * 0.4) + 0.12 * pulse;
+      drawShadowBody(g, bx, S, time, k.walk, 0, lean, this.rage > 0 ? 0xffb347 : formCol, rim * this.shadowA);
+      const pose = drawShadowBody(g, bx, S, time, k.walk, 0.9 * this.shadowA, lean);
+      const hd = this.hand;
+      if (this.state !== 'fail' && this.mode !== 'dark' && !this.dash) {
+        const sh = hd.sh || pose.shoulder, ang = Math.atan2(hd.y - sh.y, hd.x - sh.x);
+        drawArm(g, sh, hd, S, 0.9 * this.shadowA);
+        if (this.form === 'hand') {
+          drawClaw(g, hd.x, hd.y, this.handR, ang, hd.slam > 0 || !!this.held, 0.92 * this.shadowA);
+          if (!this.held && this.state === 'play') for (const m of this.monsters) if (m.alive && !m.thrown && MONSTER[m.type].grab && Math.hypot(m.x - hd.x, m.y - hd.y) - m.r < this.handR * 1.5) {
+            g.lineStyle(2, 0xffe066, 0.5 + 0.3 * Math.sin(time * 0.02)); g.strokeCircle(m.x, m.y, m.r + 6); break;
+          }
+        } else if (this.form === 'wolf') {
+          const dir = Math.cos(ang) >= 0 ? 1 : -1, s = S / 7;
+          drawWolf(g, hd.x - dir * 30 * s, hd.y + 11 * s, s * 1.12, dir, time, 0.45 * this.shadowA, 0xffb347);
+          const w = drawWolf(g, hd.x - dir * 30 * s, hd.y + 10 * s, s, dir, time, 0.92 * this.shadowA);
+          this.eyeG && (this.wolfEye = w.eye);
+        } else {
+          drawRaven(g, hd.x, hd.y, S / 3.4, time, Math.cos(ang) >= 0 ? 1 : -1, 0.5 * this.shadowA, 0x7fe8ff);
+          drawRaven(g, hd.x, hd.y, S / 4, time, Math.cos(ang) >= 0 ? 1 : -1, 0.92 * this.shadowA);
+        }
+        if (this.rage > 0) { g.lineStyle(3, 0xffb347, 0.6); g.strokeCircle(hd.x, hd.y, this.handR * 1.5); }
+      }
+      g.fillStyle(this.rage > 0 ? 0xffd27a : this.form === 'wolf' ? 0xffb347 : this.form === 'raven' ? 0x7fe8ff : 0xc9a8ff, 0.85 * this.shadowA);
+      g.fillEllipse(pose.head.x - 2.2 * S, pose.head.y + 0.3 * S, 1.3 * S, 0.6 * S); g.fillEllipse(pose.head.x + 2.2 * S, pose.head.y + 0.3 * S, 1.3 * S, 0.6 * S);
+    }
+    // wolf dash + afterimages
+    for (const a of this.afterimages) drawWolf(this.fxG, a.x, a.y, a.s, a.dir, time, a.a * 0.35, 0xffb347);
+    if (this.dash) {
+      const D = this.dash, s = this.S / TUNE.scaleNormal * 1.7;
+      drawWolf(g, D.x, D.y + 2, s * 1.12, D.dir, time * 3, 0.55, 0xffb347);
+      const w = drawWolf(g, D.x, D.y, s, D.dir, time * 3, 0.97, 0x05030c);
+      this.fxG.lineStyle(6 * s, 0xffb347, 0.25); this.fxG.lineBetween(D.x0, D.y0, D.x, D.y);
+      this.fxG.fillStyle(0xffb347, 1); this.fxG.fillCircle(w.eye.x, w.eye.y, 3 * s);
+      this.fxG.lineStyle(2, 0xffb347, 0.5); this.fxG.lineBetween(D.x0, D.y0, D.x, D.y);
+    }
+    // ravens
+    for (const r of this.ravens) {
+      drawRaven(g, r.x, r.y, 1.9, time + r.seed * 100, r.vx >= 0 ? 1 : -1, 0.5, 0x7fe8ff);
+      drawRaven(g, r.x, r.y, 1.6, time + r.seed * 100, r.vx >= 0 ? 1 : -1, 0.95);
+      this.fxG.fillStyle(0x7fe8ff, 1); this.fxG.fillCircle(r.x + (r.vx >= 0 ? 6 : -6), r.y - 2, 1.6);
+    }
+
+    // ---- monsters ----
+    const mg = this.monG; mg.clear();
+    const eg = this.eyeG; eg.clear();
+    for (const m of this.monsters) {
+      if (!m.alive) continue;
+      const t = time * 0.01 + m.seed, wob = Math.sin(t) * 2, inLight = Math.hypot(m.x - cp.x, m.y - cp.y) < lightR;
+      const shake = (inLight || m.held) ? (Math.random() - 0.5) * 3 : 0, r = m.r, x = m.x + shake, y = m.y;
+      const body = m.flash > 0 ? 0xffffff : 0x06040c;
+      if (m.type === 'brute') {
+        mg.fillStyle(0xff3355, 0.2); mg.fillCircle(x, y, r * 1.5);
+        mg.fillStyle(body, 1); mg.fillEllipse(x, y + 2, r * 2.2 + wob, r * 1.9 - wob);
+        mg.fillTriangle(x - r * 0.7, y - r * 0.5, x - r * 0.3, y - r * 0.8, x - r * 0.9, y - r * 1.5);
+        mg.fillTriangle(x + r * 0.7, y - r * 0.5, x + r * 0.3, y - r * 0.8, x + r * 0.9, y - r * 1.5);
+        const look = Math.sign(k.x - m.x) * 3;
+        eg.fillStyle(0xff3344, 1); eg.fillCircle(x - 8 + look, y - 4, 4); eg.fillCircle(x + 8 + look, y - 4, 4);
+        mg.fillStyle(0xffffff, 0.9); mg.fillRect(x - 10 + look, y + 6, 20, 3);
+        for (let i = 0; i < MONSTER.brute.hp; i++) { eg.fillStyle(i < m.hp ? 0xff6a6a : 0x2a2440); eg.fillRect(x - 13 + i * 10, y - r * 1.9, 7, 4); }
+        continue;
+      }
+      if (m.type === 'snuffer') {
+        const flap = Math.sin(time * 0.05 + m.seed) * 0.6;
+        mg.fillStyle(0x9fe8ff, 0.2); mg.fillCircle(x, y, r * 1.8);
+        mg.fillStyle(body, 1);
+        mg.fillTriangle(x, y, x - r * 2.2, y - r * (1.2 + flap), x - r * 1.6, y + r * 0.8);
+        mg.fillTriangle(x, y, x + r * 2.2, y - r * (1.2 + flap), x + r * 1.6, y + r * 0.8);
+        mg.fillCircle(x, y, r * 0.8);
+        eg.fillStyle(0x9fe8ff, 1); eg.fillCircle(x - 3, y - 2, 2.5); eg.fillCircle(x + 3, y - 2, 2.5);
+        continue;
+      }
+      if (m.golden) { mg.fillStyle(0xffd700, 0.45 + 0.2 * Math.sin(time * 0.02)); mg.fillCircle(x, y, r * 2 + wob); eg.fillStyle(0xfff0a0, 1); for (let s2 = 0; s2 < 3; s2++) { const a2 = time * 0.006 + s2 * 2.1; eg.fillCircle(x + Math.cos(a2) * r * 1.9, y + Math.sin(a2) * r * 1.9, 2); } }
+      mg.fillStyle(m.thrown ? 0xffb347 : m.march ? 0xff6a8a : 0x8a5cff, m.thrown ? 0.35 : 0.25); mg.fillCircle(x, y, r * 1.6 + wob);
+      mg.fillStyle(body, 1); mg.fillCircle(x, y, r + wob * 0.5);
+      for (let i = 0; i < 5; i++) {
+        const a = Math.PI * 0.5 + (i - 2) * 0.45, l = r * 1.4 + Math.sin(t * 1.3 + i) * 4;
+        mg.fillTriangle(x + Math.cos(a - 0.25) * r * 0.8, y + Math.sin(a - 0.25) * r * 0.8, x + Math.cos(a + 0.25) * r * 0.8, y + Math.sin(a + 0.25) * r * 0.8, x + Math.cos(a) * l, y + Math.sin(a) * l);
+      }
+      const look = Math.sign(k.x - m.x) * 2, red = m.wind || m.lunge;
+      eg.fillStyle(m.held ? 0xffffff : red ? 0xff3344 : inLight ? 0xffffff : 0xffe066, 1);
+      if (m.held) { eg.fillCircle(x - 4, y - 2, 3); eg.fillCircle(x + 4, y - 2, 3); }
+      else { eg.fillTriangle(x - 7 + look, y - 4, x - 2 + look, y - 2, x - 6 + look, y + 1); eg.fillTriangle(x + 7 + look, y - 4, x + 2 + look, y - 2, x + 6 + look, y + 1); }
+      if (m.wind) { eg.lineStyle(2, 0xff3344, 0.8); eg.strokeCircle(x, y, r * 1.9 + m.wind * 20); }
+    }
+    for (const w of this.watchers) {
+      if (!w.alive) continue;
+      const red = w.wind || w.lunge;
+      if (!red && Math.sin(time * 0.002 + w.seed * 3) < -0.95) continue;
+      const s = red ? 1.4 : 1;
+      eg.fillStyle(red ? 0xff3344 : 0xffe066, red ? 1 : 0.75);
+      eg.fillTriangle(w.x - 10 * s, w.y - 4 * s, w.x - 3 * s, w.y - 1, w.x - 9 * s, w.y + 3 * s);
+      eg.fillTriangle(w.x + 10 * s, w.y - 4 * s, w.x + 3 * s, w.y - 1, w.x + 9 * s, w.y + 3 * s);
+      if (w.wind) { eg.lineStyle(2, 0xff3344, 0.6); eg.strokeCircle(w.x, w.y, 20 + w.wind * 30);
+        const a = 0.5 + 0.5 * Math.sin(time * 0.04); eg.lineStyle(3, 0xff3344, a); eg.lineBetween(w.tx - 12, FLOOR - 12, w.tx + 12, FLOOR + 4); eg.lineBetween(w.tx + 12, FLOOR - 12, w.tx - 12, FLOOR + 4); }
+    }
+
+    for (const s of this.sparks) { this.fxG.fillStyle(0xffd27a, 1); this.fxG.fillCircle(s.x, s.y, 2.5); this.fxG.fillStyle(0xff9a3c, 0.4); this.fxG.fillCircle(s.x - s.vx * 0.02, s.y - s.vy * 0.02, 2); }
+    if (this.bubble) this.bubble.setPosition(k.x, FLOOR - 76 - Math.abs(hopY));
+    if (this.boss) this.drawBoss(time);
+    this.drawChase(time);
+    if (this.R.type === 'wind') this.drawWind(time);
+
+    // frozen-time look: blue tint, ice rings on everything frozen, a clock that runs out
+    this.timeTint.setAlpha(this.timeStop > 0 ? 0.13 + 0.03 * Math.sin(time * 0.01) : 0);
+    if (this.timeStop > 0) {
+      for (const m of this.monsters) if (m.alive && !m.held && !m.thrown) { eg.lineStyle(2, 0x9fe8ff, 0.8); eg.strokeCircle(m.x, m.y, m.r * 1.6); }
+      for (const w of this.watchers) if (w.alive) { eg.lineStyle(2, 0x9fe8ff, 0.6); eg.strokeCircle(w.x, w.y, 18); }
+      if (this.boss && !this.boss.defeated) { eg.lineStyle(3, 0x9fe8ff, 0.8); eg.strokeCircle(this.boss.hand.x, this.boss.hand.y, 50); }
+      if (this.chase) { const cx2 = this.chase.x; this.fxG.lineStyle(4, 0x9fe8ff, 0.7); this.fxG.lineBetween(cx2 + 20, 40, cx2 + 20, FLOOR); }
+      const f = this.timeStop / 3, ccx = W - 150, ccy = 46;      // small countdown ring beside the clock
+      this.fxG.fillStyle(0x0b1830, 0.7); this.fxG.fillCircle(ccx + this.cameras.main.scrollX, ccy, 20);
+      this.fxG.lineStyle(3, 0x9fe8ff, 1); this.fxG.beginPath(); this.fxG.arc(ccx + this.cameras.main.scrollX, ccy, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * f); this.fxG.strokePath();
+      this.fxG.lineBetween(ccx + this.cameras.main.scrollX, ccy, ccx + this.cameras.main.scrollX + Math.cos(-Math.PI / 2 + Math.PI * 2 * f) * 15, ccy + Math.sin(-Math.PI / 2 + Math.PI * 2 * f) * 15);
+    }
+    this.giantTint.setAlpha((this.rage > 0 ? 0.1 : 0.07) * this.g);
+    this.giantTint.fillColor = this.rage > 0 ? 0xffa040 : 0x6a3cff;
+    this.giantTxt.setText(this.rage > 0 ? 'RAGE ' + Math.ceil(this.rage) : 'GIANT!').setColor(this.rage > 0 ? '#ffb347' : '#c9a8ff')
+      .setAlpha(this.g > 0.5 && !this.trailer && this.state === 'play' ? 0.6 + 0.4 * Math.sin(time * 0.015) : 0);
+
+    // ---- HUD ----
+    const hu = this.hud; hu.clear();
+    if (this.trailer) return;
+    for (let i = 0; i < TUNE.courage; i++) {
+      const x = 26 + i * 26, y = 28, on2 = i < k.courage;
+      hu.fillStyle(on2 ? 0xff6a6a : 0x2a2440);
+      hu.fillCircle(x - 5, y - 3, 6); hu.fillCircle(x + 5, y - 3, 6); hu.fillTriangle(x - 11, y, x + 11, y, x, y + 12);
+    }
+    if (this.mode !== 'dark') {
+      const wf = this.wax / TUNE.waxMax;
+      hu.fillStyle(0x1a1428, 0.9); hu.fillRect(110, 18, 164, 18);
+      hu.fillStyle(this.rage > 0 ? 0xffd27a : wf < 0.25 ? 0xff5a3a : this.g > 0.5 ? 0xff9a3c : 0xffd27a); hu.fillRect(112, 20, 160 * wf, 14);
+      hu.fillStyle(0xf4ead0); hu.fillRect(280, 16, 8, 22); hu.fillStyle(0xffa040); hu.fillCircle(284, 13, 4 + Math.random());
+    }
+    if (this.chase) {
+      const gap = Math.max(0, k.x - this.chase.x);
+      hu.fillStyle(0x1a1428, 0.9); hu.fillRect(W / 2 - 100, 62, 200, 8);
+      hu.fillStyle(gap < 120 ? 0xff3344 : 0xc9a8ff); hu.fillRect(W / 2 - 100, 62, Math.min(200, gap / 2), 8);
+    }
+    // form selector
+    ['hand', 'wolf', 'raven'].forEach((f, i) => {
+      const t = this.formTxts[i], un = this.unlocked.includes(f), sel = this.form === f;
+      t.setAlpha(un ? (sel ? 1 : 0.45) : 0.12).setText(un ? FORMS[f].key + ' ' + FORMS[f].name : 'LOCKED').setScale(sel ? 1.15 : 1);
+      const cx = W / 2 - 90 + i * 90;
+      if (sel) { hu.lineStyle(2, Phaser.Display.Color.HexStringToColor(FORMS[f].color).color, 0.9); hu.strokeRoundedRect(cx - 40, H - 34, 80, 24, 6); }
+      const cd = f === 'wolf' ? this.wolfCool / TUNE.wolfCool : f === 'raven' ? this.ravenCool / TUNE.ravenCool : 0;
+      if (un && cd > 0) { hu.fillStyle(0x000000, 0.6); hu.fillRect(cx - 38, H - 32, 76 * cd, 20); }
+    });
+    // the night clock (counts down to midnight)
+    const R2 = this.R;
+    if (R2.type === 'boss') this.clockTxt.setText(this.state === 'cut' && this.boss && this.boss.defeated ? '12:00 AM' : fmtClock(R2.clock, Math.min(59, Math.floor(this.roomT))));
+    else { const nxt = ROOMS[this.ri + 1] ? ROOMS[this.ri + 1].clock - 1 : R2.clock + 5; this.clockTxt.setText(fmtClock(Math.min(nxt, R2.clock + Math.floor(this.roomT / 4)))); }
+    this.clockTxt.setColor(this.timeStop > 0 ? '#9fe8ff' : R2.type === 'boss' && this.roomT > 40 ? '#ff6a8a' : '#ffd27a');
+    // STOP THE CLOCK slot
+    this.stopTxt.setAlpha(this.hasStop ? (this.stopCool > 0 ? 0.4 : 1) : 0.12).setText(this.hasStop ? 'F STOP TIME' : 'LOCKED');
+    if (this.hasStop && this.stopCool > 0) { hu.fillStyle(0x000000, 0.6); hu.fillRect(W / 2 + 140, H - 32, 100 * this.stopCool / 9, 20); }
+    if (this.hasStop) { hu.lineStyle(1, 0x9fe8ff, this.stopCool > 0 ? 0.3 : 0.8); hu.strokeRoundedRect(W / 2 + 138, H - 34, 104, 24, 6); }
+    this.scoreTxt.setText(String(this.score)).setScale(1 + 0.05 * pulse);
+    let tier = null; for (const [n, name, col] of COMBO_TIERS) if (this.combo >= n) { tier = [name, col]; break; }
+    this.comboTxt.setText(this.combo >= 2 ? `COMBO x${this.combo}${tier ? '  ' + tier[0] : ''}` : '').setColor(tier ? tier[1] : '#ffb347');
+  }
+}
+
+// =====================================================================
+//  Teaser: character cards (press C on the title)
+// =====================================================================
+const CARDS = [
+  { name: 'MILO', sub: '7 YEARS OLD.\nAFRAID OF THE DARK.', color: '#8fb0f0', who: 'kid' },
+  { name: 'SHADE', sub: 'HIS SHADOW.\nTHAT\'S YOU.', color: '#c9a8ff', who: 'shade' },
+  { name: 'NIGHTLINGS', sub: 'THEY FEED ON FEAR.\nTHEY HATE THE LIGHT.', color: '#ffe066', who: 'nightling' },
+  { name: 'THE HOLLOW', sub: 'A SHADOW WITH\nNO ONE LEFT TO PROTECT.', color: '#ff6a8a', who: 'hollow' },
+];
+
+class Intro extends Phaser.Scene {
+  constructor() { super('Intro'); }
+  create() {
+    this.cameras.main.setBackgroundColor('#04030a').fadeIn(300);
+    Music.play('dark');
+    this.g = this.add.graphics();
+    this.glow = this.add.image(W * 0.3, H / 2, 'glow').setBlendMode(ADD).setScale(3).setAlpha(0);
+    this.nameT = addText(this, W * 0.62, 200, '', 44, '#fff').setOrigin(0.5).setShadow(0, 0, '#000', 12, true, true);
+    this.subT = addText(this, W * 0.62, 290, '', 13, '#d8d0ff', { align: 'center', lineSpacing: 12 }).setOrigin(0.5, 0);
+    this.bars = [this.add.rectangle(0, 0, W, 60, 0x000000).setOrigin(0), this.add.rectangle(0, H - 60, W, 60, 0x000000).setOrigin(0)];
+    this.skipT = addText(this, W - 16, H - 30, 'CLICK: NEXT    ESC: SKIP', 7, '#5a5280').setOrigin(1, 0.5);
+    this.add.image(0, 0, 'vignette').setOrigin(0);
+    this.idx = -1; this.cardT = 0;
+    this.input.on('pointerdown', () => this.next());
+    this.input.keyboard.on('keydown', (e) => { if (e.key === 'Escape') this.finish(); else this.next(); });
+    this.next();
+  }
+  next() {
+    AudioSys.ac();
+    if (this.idx >= CARDS.length) return;
+    this.idx++;
+    if (this.idx >= CARDS.length) { this.tagline(); return; }
+    const c = CARDS[this.idx];
+    this.cardT = 0; this.full = c.sub; this.shown = 0;
+    this.nameT.setText(c.name).setColor(c.color).setScale(3).setAlpha(0);
+    this.tweens.add({ targets: this.nameT, scale: 1, alpha: 1, duration: 180, ease: 'Cubic.easeIn', onComplete: () => { Sfx.card(); this.cameras.main.shake(200, 0.012); this.cameras.main.flash(120, 255, 255, 255); } });
+    this.subT.setText('');
+    this.glow.setTint(Phaser.Display.Color.HexStringToColor(c.color).color).setAlpha(0.35);
+    if (this.auto) this.auto.remove();
+    this.auto = this.time.delayedCall(3200, () => this.next());
+  }
+  tagline() {
+    if (this.tagged) return; this.tagged = true;
+    if (this.auto) this.auto.remove();
+    this.g.clear(); this.nameT.setText(''); this.subT.setText(''); this.glow.setAlpha(0);
+    const lines = ['ONE CANDLE.', 'ONE NIGHT.', 'ONE SHADOW.'];
+    lines.forEach((l, i) => {
+      const t = addText(this, W / 2, 200 + i * 50, l, 20, i === 2 ? '#ffb347' : '#ffffff').setOrigin(0.5).setAlpha(0).setScale(1.6);
+      this.time.delayedCall(i * 700, () => { this.tweens.add({ targets: t, alpha: 1, scale: 1, duration: 200 }); Sfx.card(); this.cameras.main.shake(120, 0.006); });
+    });
+    this.time.delayedCall(3000, () => this.finish());
+  }
+  finish() {
+    if (this.done) return; this.done = true;
+    this.cameras.main.fadeOut(500, 0, 0, 0);
+    this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('Title'));
+  }
+  update(time, dtMs) {
+    if (this.idx < 0 || this.idx >= CARDS.length) return;
+    const c = CARDS[this.idx], dt = dtMs / 1000;
+    this.cardT += dt;
+    if (this.cardT > 0.35 && this.shown < this.full.length) {
+      this.shown = Math.min(this.full.length, this.shown + dt * 30);
+      const n = Math.floor(this.shown);
+      if (this.subT.text.length !== n) { this.subT.setText(this.full.slice(0, n)); if (n % 2) Sfx.type(); }
+    }
+    const g = this.g; g.clear();
+    const cx = W * 0.28, appear = Math.min(1, this.cardT * 2);
+    if (c.who === 'kid') {
+      this.drawScaled(g, 3.2, cx, FLOOR + 20, (gg) => drawKid(gg, 0, 0, { time, scared: true, hand: { x: 15, y: -44 }, candle: { x: 15, y: -44, lit: true } }));
+      this.glow.setPosition(cx + 48, FLOOR + 20 - 140).setScale(2.2 + Math.sin(time * 0.02) * 0.05);
+    } else if (c.who === 'shade') {
+      const S = 2 + 8 * appear;
+      const pose = drawShadowBody(g, cx, S, time, 0, 0.95, -0.05, 0x05030c, 0.35);
+      g.fillStyle(0xc9a8ff, 0.9);
+      g.fillEllipse(pose.head.x - 2.5 * S, pose.head.y, 1.4 * S, 0.7 * S); g.fillEllipse(pose.head.x + 2.5 * S, pose.head.y, 1.4 * S, 0.7 * S);
+      this.glow.setPosition(cx, 300).setScale(4);
+    } else if (c.who === 'nightling') {
+      for (let i = 0; i < 7; i++) {
+        const x = cx - 120 + (i % 4) * 80 + Math.sin(time * 0.002 + i) * 10, y = 180 + Math.floor(i / 4) * 120 + Math.cos(time * 0.003 + i) * 12, r = 22 * appear;
+        g.fillStyle(0x8a5cff, 0.25); g.fillCircle(x, y, r * 1.6);
+        g.fillStyle(0x06040c); g.fillCircle(x, y, r);
+        g.fillStyle(0xffe066); g.fillTriangle(x - 12, y - 6, x - 3, y - 3, x - 10, y + 2); g.fillTriangle(x + 12, y - 6, x + 3, y - 3, x + 10, y + 2);
+      }
+      this.glow.setPosition(cx, 260).setScale(3);
+    } else {
+      const S = 13;
+      const pose = drawShadowBody(g, cx + 30, S, time, 0, 0.95, 0.05, 0x05030c, 0.3);
+      g.fillStyle(0xffffff, appear); g.fillEllipse(pose.head.x - 2.6 * S, pose.head.y, 1.6 * S, 2.4 * S); g.fillEllipse(pose.head.x + 2.6 * S, pose.head.y, 1.6 * S, 2.4 * S);
+      g.fillStyle(0xff6a8a, 0.4 + 0.3 * Math.sin(time * 0.006)); g.fillCircle(pose.chest.x, pose.chest.y, 2 * S);
+      this.glow.setPosition(cx, 260).setScale(4);
+    }
+  }
+  drawScaled(g, s, ox, oy, fn) {
+    // a tiny proxy that scales every coordinate before drawing
+    const P = {
+      fillStyle: (c, a) => g.fillStyle(c, a), lineStyle: (w, c, a) => g.lineStyle(w * s, c, a),
+      fillRect: (x, y, w, h) => g.fillRect(ox + x * s, oy + y * s, w * s, h * s),
+      fillRoundedRect: (x, y, w, h, r) => g.fillRoundedRect(ox + x * s, oy + y * s, w * s, h * s, r * s),
+      fillCircle: (x, y, r) => g.fillCircle(ox + x * s, oy + y * s, r * s),
+      fillEllipse: (x, y, w, h) => g.fillEllipse(ox + x * s, oy + y * s, w * s, h * s),
+      fillTriangle: (a, b, c, d, e, f) => g.fillTriangle(ox + a * s, oy + b * s, ox + c * s, oy + d * s, ox + e * s, oy + f * s),
+      lineBetween: (a, b, c, d) => g.lineBetween(ox + a * s, oy + b * s, ox + c * s, oy + d * s),
+      beginPath: () => g.beginPath(), arc: (x, y, r, a0, a1) => g.arc(ox + x * s, oy + y * s, r * s, a0, a1), strokePath: () => g.strokePath(),
+    };
+    fn(P);
+  }
+}
+
+// =====================================================================
+//  Dawn ending
+// =====================================================================
+class Ending extends Phaser.Scene {
+  constructor() { super('Ending'); }
+  create() {
+    this.cameras.main.fadeIn(1500, 255, 240, 220);
+    Music.play('dawn');
+    this.sky = this.add.graphics();
+    this.add.tileSprite(0, 40, W, FLOOR - 40, 'wallA').setOrigin(0).setAlpha(0.55);
+    this.win = this.add.graphics();
+    this.sun = this.add.image(W / 2 + 200, 260, 'glow').setBlendMode(ADD).setTint(0xffd8a0).setScale(4).setAlpha(0);
+    this.add.tileSprite(0, FLOOR, W, H - FLOOR, 'floor').setOrigin(0);
+    this.shG = this.add.graphics(); this.kidG = this.add.graphics();
+    this.add.image(0, 0, 'vignette').setOrigin(0).setAlpha(0.6);
+    this.t = 0; this.shadowS = 6; this.shadowA = 0.85; this.waving = false;
+    this.tweens.add({ targets: this, shadowS: 2.4, duration: 8000, ease: 'Sine.easeInOut' });
+    this.tweens.add({ targets: this.sun, alpha: 0.9, scale: 6, duration: 7000 });
+    const lines = [
+      [0.8, 'AT DAWN, EVERY SHADOW GOES TO SLEEP.'],
+      [4.0, 'BUT EVERY NIGHT...'],
+      [6.8, 'IT COMES BACK. TO KEEP HIM SAFE.'],
+    ];
+    for (const [d, l] of lines) this.time.delayedCall(d * 1000, () => {
+      const o = addText(this, W / 2, 80, l, 13, '#2a1a30', { align: 'center' }).setOrigin(0.5).setAlpha(0);
+      this.tweens.add({ targets: o, alpha: 1, duration: 800 }); this.time.delayedCall(3000, () => this.tweens.add({ targets: o, alpha: 0, duration: 800 }));
+    });
+    this.time.delayedCall(2500, () => { this.waving = true; });
+    this.time.delayedCall(8500, () => this.tweens.add({ targets: this, shadowA: 0, duration: 1800 }));
+    if (this.registry.get('autoplay')) this.time.delayedCall(4600, () => this.trailerEnd());
+    else this.time.delayedCall(10500, () => this.credits());
+  }
+  trailerEnd() {
+    this.add.rectangle(0, 0, W, H, 0x000000, 1).setOrigin(0).setDepth(30);
+    const items = [
+      addText(this, W / 2, H / 2 - 50, 'S H A D E', 56, '#ffb347').setOrigin(0.5).setShadow(0, 0, '#ff5a1f', 24, true, true),
+      addText(this, W / 2, H / 2 + 20, 'FIRE.   SHADOW.   TIME.', 12, '#ffe8c0').setOrigin(0.5),
+      addText(this, W / 2, H / 2 + 60, 'YOU ARE HIS SHADOW.', 12, '#ffffff').setOrigin(0.5),
+      addText(this, W / 2, H / 2 + 100, 'PLAY IT NOW', 14, '#ff8a3c').setOrigin(0.5),
+      addText(this, W / 2, H - 70, 'MADE FOR FAST NASCON GAME JAM', 8, '#8a80b0').setOrigin(0.5),
+    ];
+    items.forEach((o, i) => { o.setDepth(31).setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 500, delay: i * 350 }); });
+    Sfx.card();
+    this.time.delayedCall(2000, () => {
+      Music.stop();
+      Recorder.stop().then((blob) => {
+        Recorder.save(blob);
+        this.registry.set('autoplay', false); this.registry.set('trailer', false);
+        items.forEach(o => o.destroy());
+        const t = addText(this, W / 2, H / 2, blob ? 'TRAILER SAVED:  SHADE_trailer.webm\n\nCLICK TO RETURN' : 'RECORDING NOT SUPPORTED IN THIS BROWSER\n\nCLICK TO RETURN', 11, '#ffffff', { align: 'center', lineSpacing: 10 }).setOrigin(0.5).setDepth(31);
+        this.input.once('pointerdown', () => this.scene.start('Title'));
+      });
+    });
+  }
+  credits() {
+    const r = this.registry, score = r.get('score') || 0, best = r.get('best') || 0, rew = r.get('rewinds') || 0;
+    const secs = Math.round((Date.now() - (r.get('t0') || Date.now())) / 1000);
+    const rs = (r.get('ratings') || []), sCount = rs.filter(x => x === 'S').length;
+    const rank = sCount >= 6 ? 'S' : sCount >= 4 ? 'A' : sCount >= 2 ? 'B' : 'C';
+    const RC = { S: '#ffe066', A: '#7fe8ff', B: '#c9a8ff', C: '#ff9ab0', '-': '#5a5280' };
+    const D = 40, items = [];
+    const bestAll = Best.get(), newHigh = score > (bestAll.score || 0) && !r.get('autoplay');
+    if (newHigh) { bestAll.score = score; Best.set(bestAll); this.time.delayedCall(1400, () => Sfx.best()); }
+    // a full dark backdrop so the score card reads clearly over the bright sunrise
+    const veil = this.add.rectangle(0, 0, W, H, 0x05040c, 0).setOrigin(0).setDepth(D);
+    this.tweens.add({ targets: veil, fillAlpha: 0.94, duration: 900 });
+    const cx = W / 2, px = cx - 240, pw = 480, py = 196, ph = 232;
+    const card = this.add.graphics().setDepth(D + 1);
+    card.fillStyle(0x110d22, 1); card.fillRoundedRect(px, py, pw, ph, 12);
+    card.lineStyle(2, 0xffb347, 0.55); card.strokeRoundedRect(px, py, pw, ph, 12);
+    items.push(card);
+    items.push(addText(this, cx, 104, 'SHADE', 48, '#ffb347').setOrigin(0.5).setShadow(0, 0, '#ff5a1f', 20, true, true));
+    items.push(addText(this, cx, 158, 'YOU ARE HIS SHADOW.', 12, '#ffffff').setOrigin(0.5));
+    const row = (i, label, value, color = '#ffffff') => {
+      const y = py + 30 + i * 34;
+      items.push(addText(this, px + 28, y, label, 11, '#a99fd0').setOrigin(0, 0.5));
+      if (value !== null) items.push(addText(this, px + pw - 28, y, value, 13, color).setOrigin(1, 0.5));
+      return y;
+    };
+    row(0, 'SCORE', score.toLocaleString('en-US'));
+    row(1, 'BEST COMBO', 'x' + best, '#ffb347');
+    const ry = row(2, 'ROOM RANKS', null);
+    ROOMS.forEach((R, i) => { const v = rs[i] || '-'; items.push(addText(this, px + pw - 28 - (ROOMS.length - 1 - i) * 30, ry, v, 13, RC[v]).setOrigin(1, 0.5)); });
+    row(3, 'RETRIES', String(rew));
+    row(4, 'TIME', `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s`);
+    const fy = py + 30 + 5 * 34 + 4;
+    items.push(addText(this, px + 28, fy, 'FINAL RANK', 12, '#ffffff').setOrigin(0, 0.5));
+    items.push(addText(this, px + pw - 28, fy, rank, 26, RC[rank]).setOrigin(1, 0.5).setShadow(0, 0, '#000', 8, true, true));
+    if (newHigh) items.push(addText(this, cx, 180, 'NEW HIGH SCORE!', 11, '#ffd700').setOrigin(0.5));
+    items.push(addText(this, cx, 462, 'MADE FOR FAST NASCON GAME JAM  -  FIRE / SHADOW / TIME', 8, '#9a90c0').setOrigin(0.5));
+    items.push(addText(this, cx, 494, 'CLICK TO PLAY AGAIN', 10, '#ff8a3c').setOrigin(0.5));
+    items.forEach((o, i) => { o.setDepth(o.depth || D + 2); if (o.depth < D + 1) o.setDepth(D + 2); o.setAlpha(0); this.tweens.add({ targets: o, alpha: 1, duration: 500, delay: 500 + i * 60 }); });
+    this.time.delayedCall(2500, () => this.input.once('pointerdown', () => this.scene.start('Title')));
+  }
+  update(time, dtMs) {
+    this.t += dtMs / 1000;
+    const p = Math.min(1, this.t / 7);
+    const lerp = (a, b) => Phaser.Display.Color.Interpolate.ColorWithColor(Phaser.Display.Color.ValueToColor(a), Phaser.Display.Color.ValueToColor(b), 100, p * 100);
+    const g = this.sky; g.clear();
+    const c = lerp(0x1a1030, 0xffc890); g.fillStyle(Phaser.Display.Color.GetColor(c.r, c.g, c.b)); g.fillRect(0, 0, W, H);
+    const w = this.win; w.clear();
+    const wc = lerp(0x2a2050, 0xffe0a0); w.fillStyle(Phaser.Display.Color.GetColor(wc.r, wc.g, wc.b)); w.fillRect(W / 2 + 130, 120, 150, 170);
+    w.fillStyle(0xfff0c0, p); w.fillCircle(W / 2 + 205, 290 - p * 110, 34);
+    w.lineStyle(8, 0x3a2a30); w.strokeRect(W / 2 + 130, 120, 150, 170); w.lineBetween(W / 2 + 205, 120, W / 2 + 205, 290); w.lineBetween(W / 2 + 130, 205, W / 2 + 280, 205);
+    const kx = W / 2 - 40;
+    const sg = this.shG; sg.clear();
+    const pose = drawShadowBody(sg, kx - 30, this.shadowS, time, 0, this.shadowA, -0.25);
+    if (this.waving && this.shadowA > 0.05) {
+      const sh = pose.shoulder, wave = Math.sin(time * 0.008) * 0.5;
+      const hd = { x: sh.x - 6 * this.shadowS + Math.cos(-2 + wave) * 10, y: sh.y - 13 * this.shadowS };
+      drawArm(sg, sh, hd, this.shadowS, this.shadowA);
+      drawClaw(sg, hd.x, hd.y, this.shadowS * 4, -Math.PI / 2 + wave, false, this.shadowA);
+    }
+    const kg = this.kidG; kg.clear();
+    drawKid(kg, kx, FLOOR, { time, face: -1, smile: true, blink: Math.floor(time / 3000) % 4 === 0 && time % 3000 < 150 });
+    if (this.waving) {
+      const a = Math.sin(time * 0.008) * 0.6;
+      kg.lineStyle(5, 0x6a8fd8); kg.lineBetween(kx - 8, FLOOR - 35, kx - 18 + Math.cos(-2.2 + a) * 4, FLOOR - 58);
+      kg.fillStyle(0xf2c9a0); kg.fillCircle(kx - 18 + Math.cos(-2.2 + a) * 4, FLOOR - 60, 3.5);
+    }
+  }
+}
+
+// =====================================================================
+//  TRAILER: press V on the title. Records a ~3 minute trailer to a .webm:
+//  a cinematic teaser (~45 s) followed by real gameplay played by the autopilot.
+// =====================================================================
+const Recorder = {
+  rec: null, chunks: [],
+  start(canvas) {
+    try {
+      const hd = document.createElement('canvas'); hd.width = 1920; hd.height = 1080;
+      const hx = hd.getContext('2d'); hx.imageSmoothingEnabled = false;
+      this.copy = () => { hx.drawImage(canvas, 0, 0, 1920, 1080); if (this.track && this.track.requestFrame) this.track.requestFrame(); };
+      window.game.events.on('postrender', this.copy);
+      const vs = hd.captureStream(this.manual ? 0 : 60); this.track = vs.getVideoTracks()[0];
+      const tracks = [this.track];
+      const as = AudioSys.stream(); if (as) tracks.push(...as.getAudioTracks());
+      const types = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'];   // VP8 plays smoothly on more laptops
+      const mimeType = types.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+      this.rec = new MediaRecorder(new MediaStream(tracks), { mimeType, videoBitsPerSecond: 14000000 });
+      this.chunks = [];
+      this.rec.ondataavailable = (e) => { if (e.data && e.data.size) this.chunks.push(e.data); };
+      this.rec.start(1000);
+      return true;
+    } catch (e) { console.warn('recording not available', e); this.rec = null; return false; }
+  },
+  stop() {
+    return new Promise((res) => {
+      if (!this.rec) { res(null); return; }
+      this.rec.onstop = () => res(new Blob(this.chunks, { type: 'video/webm' }));
+      if (this.copy) window.game.events.off('postrender', this.copy);
+      this.rec.stop();
+    });
+  },
+  save(blob) {
+    if (!blob) return;
+    if (window.__trailerUpload) { window.__trailerUpload(blob); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'SHADE_trailer.webm';
+    document.body.appendChild(a); a.click(); a.remove();
+  },
+};
+
+function startTrailer(scene) {
+  AudioSys.ac();
+  const r = scene.registry;
+  r.set('autoplay', true); r.set('trailer', true);
+  r.set('score', 0); r.set('best', 0); r.set('rewinds', 0); r.set('t0', Date.now()); r.set('ratings', []); r.set('seen', {});
+  Recorder.start(scene.game.canvas);
+  scene.scene.start('Teaser');
+}
+
+class Teaser extends Phaser.Scene {
+  constructor() { super('Teaser'); }
+  create() {
+    this.clockTxt = null; this.lastTick = -1;   // scene objects from a previous run are destroyed
+    this.cameras.main.setBackgroundColor('#000000');
+    Music.play('dark');
+    this.wall = this.add.tileSprite(0, 40, W, FLOOR - 40, 'wallA').setOrigin(0).setDepth(0).setAlpha(0);
+    this.floor = this.add.tileSprite(0, FLOOR, W, H - FLOOR, 'floor').setOrigin(0).setDepth(0).setAlpha(0);
+    this.glow = this.add.image(W / 2, H / 2, 'glow').setBlendMode(ADD).setAlpha(0).setDepth(1);
+    this.g = this.add.graphics().setDepth(2);
+    this.fx = this.add.graphics().setDepth(3);
+    this.tint = this.add.rectangle(0, 0, W, H, 0x6fd8ff, 0).setOrigin(0).setDepth(4);
+    this.bars = [this.add.rectangle(0, 0, W, 50, 0x000000).setOrigin(0).setDepth(20), this.add.rectangle(0, H - 50, W, 50, 0x000000).setOrigin(0).setDepth(20)];
+    this.add.image(0, 0, 'vignette').setOrigin(0).setDepth(19);
+    this.burst = this.add.particles(0, 0, 'spark', { speed: { min: 150, max: 600 }, angle: { min: 0, max: 360 }, scale: { start: 2, end: 0 }, lifespan: { min: 500, max: 1300 }, tint: [0xffd700, 0xfff0a0, 0xffb347], blendMode: ADD, emitting: false }).setDepth(5);
+    this.shot = 'black'; this.eyes = []; this.lit = false; this.riseS = 0; this.heart = true; this.heartT = 0; this.shotT = 0;
+    const T = (t, fn) => this.time.delayedCall(t * 1000, fn);
+    const txt = (t, s, size = 14, col = '#d8d0ff', dur = 2.0, y = H / 2) => T(t, () => {
+      const o = addText(this, W / 2, y, s, size, col, { align: 'center', lineSpacing: 12 }).setOrigin(0.5).setDepth(21).setAlpha(0).setShadow(0, 0, '#000', 8, true, true);
+      this.tweens.add({ targets: o, alpha: 1, duration: 350 });
+      this.time.delayedCall(dur * 1000, () => this.tweens.add({ targets: o, alpha: 0, duration: 300, onComplete: () => o.destroy() }));
+    });
+    const slam = (t, s, size = 30, col = '#ffffff', dur = 1.2, y = H / 2) => T(t, () => {
+      const o = addText(this, W / 2, y, s, size, col, { align: 'center' }).setOrigin(0.5).setDepth(21).setScale(2.6).setAlpha(0).setShadow(0, 0, '#000', 12, true, true);
+      this.tweens.add({ targets: o, scale: 1, alpha: 1, duration: 150, ease: 'Cubic.easeIn', onComplete: () => { Sfx.card(); this.cameras.main.shake(180, 0.014); } });
+      this.time.delayedCall(dur * 1000, () => this.tweens.add({ targets: o, alpha: 0, duration: 220, onComplete: () => o.destroy() }));
+    });
+    const cut = (t, shot, sound = 'impact') => T(t, () => { this.shot = shot; this.shotT = 0; if (sound) Sfx[sound](); this.cameras.main.flash(60, 255, 255, 255); });
+
+    // ---- 0-4 s: the hook ----
+    T(0.1, () => { this.shot = 'eyes'; });
+    txt(0.4, 'EVERY NIGHT AT 11:00 PM...', 12, '#8a80b0', 2.4, 110);
+    T(3.4, () => { Sfx.scare(); this.cameras.main.flash(120, 255, 40, 60); this.redEyes = true; this.cameras.main.shake(300, 0.012); });
+    T(4.2, () => { this.shot = 'black'; this.eyes = []; });
+    txt(4.4, 'SOMEONE IS AFRAID.', 15, '#ffffff', 1.5);
+    // ---- 6-15 s: Milo, the candle, the shadow ----
+    T(6.2, () => { this.shot = 'milo'; this.heart = false; });
+    T(6.7, () => Sfx.scratch()); T(7.0, () => Sfx.scratch());
+    T(7.3, () => { Sfx.ignite(); this.lit = true; this.cameras.main.flash(200, 255, 190, 110); Music.play('title'); });
+    txt(7.8, "HE'S SEVEN.", 13, '#ffe8c0', 1.2, 120);
+    txt(9.1, 'HE HAS ONE CANDLE.', 13, '#ffe8c0', 1.4, 120);
+    T(10.7, () => { this.shot = 'rise'; Sfx.roar(); this.tweens.add({ targets: this, riseS: 1, duration: 1500, ease: 'Cubic.easeOut' }); this.cameras.main.shake(1400, 0.012); });
+    txt(10.9, 'AND HE HAS...', 13, '#ffffff', 1.4, 110);
+    slam(12.6, 'YOU.', 46, '#c9a8ff', 1.4, 110);
+    // ---- 14-19 s: beat-synced rapid cuts ----
+    T(14.0, () => Music.play('boss'));
+    const B = 60 / 128;                                   // one beat of the boss music
+    ['wolf', 'ravens', 'brute', 'golden', 'freeze', 'miloSmile', 'lightning', 'fist', 'hollowEyes'].forEach((s, i) => cut(14.5 + i * B, s, i === 3 ? 'golden' : i === 4 ? 'timestop' : i === 6 ? 'thunder' : 'impact'));
+    T(14.5 + 9 * B, () => { this.shot = 'black'; });
+    // ---- 19-31 s: the powers ----
+    txt(19.0, 'YOUR SHADOW CAN BECOME...', 13, '#ffffff', 1.3);
+    cut(20.5, 'wolfBig', null); slam(20.5, 'A WOLF.', 30, '#ffb347', 1.6, 110);
+    cut(22.4, 'ravenBig', null); slam(22.4, 'A STORM OF RAVENS.', 26, '#7fe8ff', 1.6, 110);
+    cut(24.3, 'giant', null); slam(24.3, 'A GIANT.', 30, '#c9a8ff', 1.6, 110);
+    T(26.2, () => { this.shot = 'black'; });
+    txt(26.3, 'IT CAN EVEN...', 13, '#ffffff', 1.2);
+    cut(27.7, 'freezeBig', 'timestop'); slam(27.7, 'STOP TIME.', 34, '#9fe8ff', 2.2, 110);
+    // ---- 30-38 s: midnight and the Hollow ----
+    cut(30.4, 'clock', null);
+    txt(30.6, 'MIDNIGHT IS COMING.', 14, '#ffd27a', 2.6, H - 90);
+    cut(33.6, 'hollow', 'roar'); T(33.6, () => this.cameras.main.shake(1500, 0.022));
+    txt(34.0, 'SOMETHING IS WAITING FOR HIM.', 13, '#ff9ab0', 2.6, H - 80);
+    // ---- 38-44 s: title ----
+    T(37.8, () => { this.shot = 'black'; });
+    T(38.3, () => {
+      this.shot = 'logo'; this.shotT = 0;
+      const o = addText(this, W / 2, H / 2 - 30, 'S H A D E', 60, '#ffb347').setOrigin(0.5).setDepth(21).setScale(3).setAlpha(0).setShadow(0, 0, '#ff5a1f', 26, true, true);
+      this.tweens.add({ targets: o, scale: 1, alpha: 1, duration: 240, ease: 'Cubic.easeIn', onComplete: () => { Sfx.roar(); Sfx.card(); this.cameras.main.shake(500, 0.02); this.cameras.main.flash(200, 255, 160, 80); } });
+      this.time.delayedCall(4400, () => this.tweens.add({ targets: o, alpha: 0, duration: 400 }));
+    });
+    txt(39.6, 'FIRE.   SHADOW.   TIME.', 12, '#ffe8c0', 3.4, H / 2 + 40);
+    txt(40.8, 'YOU ARE HIS SHADOW.', 12, '#ffffff', 2.4, H / 2 + 75);
+    T(43.3, () => { this.cameras.main.fadeOut(450, 0, 0, 0); });
+    T(43.8, () => this.scene.start('Game', { room: 0 }));
+  }
+  drawScaledKid(g, s, x, y, opts) { Intro.prototype.drawScaled(g, s, x, y, (gg) => drawKid(gg, 0, 0, opts)); }
+  nightling(g, x, y, r, time, col = 0x8a5cff, eye = 0xffe066) {
+    g.fillStyle(col, 0.3); g.fillCircle(x, y, r * 1.6); g.fillStyle(0x06040c); g.fillCircle(x, y, r);
+    g.fillStyle(eye); g.fillTriangle(x - r * 0.55, y - r * 0.3, x - r * 0.15, y - r * 0.15, x - r * 0.5, y + r * 0.1); g.fillTriangle(x + r * 0.55, y - r * 0.3, x + r * 0.15, y - r * 0.15, x + r * 0.5, y + r * 0.1);
+  }
+  update(time, dtMs) {
+    const dt = dtMs / 1000, g = this.g, fx = this.fx; g.clear(); fx.clear();
+    this.shotT += dt;
+    if (this.heart) { this.heartT -= dt; if (this.heartT <= 0) { this.heartT = this.shot === 'eyes' ? 0.42 : 0.85; Sfx.heart(); } }
+    const cx = W / 2;
+    this.glow.setAlpha(0); this.tint.setAlpha(0);
+    const walled = ['milo', 'rise', 'giant', 'hollow', 'hollowEyes', 'fist', 'freeze', 'freezeBig', 'miloSmile', 'lightning', 'golden'].includes(this.shot);
+    this.wall.setAlpha(walled ? (this.shot === 'milo' && !this.lit ? 0.15 : this.shot === 'lightning' ? 0.95 : 0.55) : 0); this.floor.setAlpha(walled ? 0.6 : 0);
+    switch (this.shot) {
+      case 'eyes': {
+        if (this.eyes.length < 30 && Math.random() < dt * 12) { this.eyes.push({ x: 60 + Math.random() * (W - 120), y: 70 + Math.random() * (H - 160), s: 0.6 + Math.random() * 1.3, seed: Math.random() * 10 }); if (Math.random() < 0.4) Sfx.hiss(); }
+        for (const e of this.eyes) {
+          if (!this.redEyes && Math.sin(time * 0.003 + e.seed * 3) < -0.93) continue;
+          g.fillStyle(this.redEyes ? 0xff3344 : 0xffe066, 0.9);
+          g.fillTriangle(e.x - 10 * e.s, e.y - 4 * e.s, e.x - 3 * e.s, e.y - 1, e.x - 9 * e.s, e.y + 3 * e.s);
+          g.fillTriangle(e.x + 10 * e.s, e.y - 4 * e.s, e.x + 3 * e.s, e.y - 1, e.x + 9 * e.s, e.y + 3 * e.s);
+        }
+        break;
+      }
+      case 'milo': case 'rise': case 'miloSmile': {
+        const ky = FLOOR + 40;
+        if (this.lit || this.shot !== 'milo') this.glow.setPosition(cx + 48, ky - 150).setTint(0xff9a3c).setScale(3.4 + Math.sin(time * 0.02) * 0.06).setAlpha(0.7);
+        if (this.shot === 'rise') {
+          const S = 2 + 11 * this.riseS;
+          const pose = drawShadowBody(g, cx - 40, S, time, 0, 0.92, -0.08, 0x05030c, 0.25 * this.riseS);
+          g.fillStyle(0xc9a8ff, 0.9 * this.riseS);
+          g.fillEllipse(pose.head.x - 2.2 * S, pose.head.y + 0.3 * S, 1.3 * S, 0.6 * S); g.fillEllipse(pose.head.x + 2.2 * S, pose.head.y + 0.3 * S, 1.3 * S, 0.6 * S);
+        }
+        if (this.shot === 'miloSmile') {
+          const pose = drawShadowBody(g, cx - 40, 11, time, 0, 0.9, -0.08, 0x05030c, 0.2);
+          g.fillStyle(0xc9a8ff, 0.9); g.fillEllipse(pose.head.x - 24, pose.head.y + 3, 14, 7); g.fillEllipse(pose.head.x + 24, pose.head.y + 3, 14, 7);
+          this.drawScaledKid(g, 3.4, cx, ky, { time, smile: true, hand: { x: 15, y: -44 }, candle: { x: 15, y: -44, lit: true } });
+          fx.fillStyle(0x1a1430, 0.95); fx.fillRoundedRect(cx + 50, ky - 300, 250, 44, 8);
+          if (!this.smileTxt) { this.smileTxt = addText(this, cx + 175, ky - 278, 'THANK YOU, SHADE!', 10, '#ffffff').setOrigin(0.5).setDepth(6); }
+          this.smileTxt.setVisible(true);
+          break;
+        }
+        this.drawScaledKid(g, 3.4, cx, ky, { time, scared: true, hand: { x: 15, y: -44 }, candle: { x: 15, y: -44, lit: this.lit } });
+        if (!this.lit && this.shot === 'milo') { g.fillStyle(0x000000, 0.75); g.fillRect(0, 0, W, H); }
+        break;
+      }
+      case 'wolf': case 'wolfBig': {
+        const p = Math.min(1, this.shotT / (this.shot === 'wolf' ? 0.45 : 1.8));
+        const s = this.shot === 'wolf' ? 3.2 : 3.8, x = -220 + p * (W + 440), y = H / 2 + 30;
+        this.glow.setPosition(x, y).setTint(0xffb347).setScale(3).setAlpha(0.4);
+        for (let i = 4; i >= 1; i--) drawWolf(g, x - i * 75, y, s, 1, time * 3, 0.12 * (5 - i), 0xffb347);
+        drawWolf(g, x, y + 3, s * 1.08, 1, time * 3, 0.6, 0xffb347);
+        const w = drawWolf(g, x, y, s, 1, time * 3, 0.97);
+        g.fillStyle(0xffd27a, 1); g.fillCircle(w.eye.x, w.eye.y, 4 * s);
+        if (this.shot === 'wolfBig') for (let i = 0; i < 5; i++) { const nx = 260 + i * 110; if (x < nx) this.nightling(g, nx, y - 10 + Math.sin(i) * 30, 18, time); }
+        break;
+      }
+      case 'ravens': case 'ravenBig': {
+        this.glow.setPosition(cx, H / 2).setTint(0x7fe8ff).setScale(4).setAlpha(0.32);
+        const n = this.shot === 'ravens' ? 16 : 26;
+        for (let i = 0; i < n; i++) {
+          const a = i * 2.4 + this.shotT * 2.4, r = 60 + (i * 37) % 260 + this.shotT * 70;
+          const x = cx + Math.cos(a) * r * 1.4, y = H / 2 + Math.sin(a) * r * 0.6;
+          drawRaven(g, x, y, 3.4, time + i * 90, Math.cos(a + 1.57) > 0 ? 1 : -1, 0.5, 0x7fe8ff);
+          drawRaven(g, x, y, 3, time + i * 90, Math.cos(a + 1.57) > 0 ? 1 : -1, 0.95);
+        }
+        break;
+      }
+      case 'brute': {
+        const x = cx, y = H / 2 + 40, r = 90 * (1 + this.shotT * 0.3);
+        this.glow.setPosition(x, y).setTint(0xff3355).setScale(3).setAlpha(0.4);
+        g.fillStyle(0x06040c); g.fillEllipse(x, y, r * 2.2, r * 1.9);
+        g.fillTriangle(x - r * 0.7, y - r * 0.5, x - r * 0.3, y - r * 0.8, x - r * 0.9, y - r * 1.5);
+        g.fillTriangle(x + r * 0.7, y - r * 0.5, x + r * 0.3, y - r * 0.8, x + r * 0.9, y - r * 1.5);
+        g.fillStyle(0xff3344); g.fillCircle(x - r * 0.3, y - r * 0.15, r * 0.15); g.fillCircle(x + r * 0.3, y - r * 0.15, r * 0.15);
+        g.fillStyle(0xffffff); g.fillRect(x - r * 0.4, y + r * 0.25, r * 0.8, r * 0.1);
+        break;
+      }
+      case 'golden': {
+        this.glow.setPosition(cx, H / 2).setTint(0xffd700).setScale(4).setAlpha(0.5);
+        if (this.shotT < 0.15) this.nightling(g, cx, H / 2, 40, time, 0xffd700, 0xfff0a0);
+        else if (!this.goldDone) { this.goldDone = true; this.burst.explode(90, cx, H / 2); }
+        break;
+      }
+      case 'freeze': case 'freezeBig': {
+        this.tint.setAlpha(0.16);
+        this.glow.setPosition(cx, H / 2).setTint(0x9fe8ff).setScale(4).setAlpha(0.25);
+        const pts = [[220, 250], [330, 330], [600, 230], [700, 340], [470, 190], [800, 260], [160, 360]];
+        for (const [x, y] of pts) { this.nightling(g, x, y, 20, 0, 0x8a5cff, 0xffffff); fx.lineStyle(3, 0x9fe8ff, 0.85); fx.strokeCircle(x, y, 34); }
+        const f = Math.max(0, 1 - this.shotT / (this.shot === 'freeze' ? 0.5 : 2.4));
+        fx.fillStyle(0x0b1830, 0.8); fx.fillCircle(cx, H / 2 + 10, 46);
+        fx.lineStyle(5, 0x9fe8ff, 1); fx.beginPath(); fx.arc(cx, H / 2 + 10, 46, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * f); fx.strokePath();
+        fx.lineBetween(cx, H / 2 + 10, cx + Math.cos(-Math.PI / 2 + Math.PI * 2 * f) * 34, H / 2 + 10 + Math.sin(-Math.PI / 2 + Math.PI * 2 * f) * 34);
+        if (Math.floor(this.shotT * 2) !== this.lastTick) { this.lastTick = Math.floor(this.shotT * 2); Sfx.tick(); }
+        break;
+      }
+      case 'lightning': {
+        fx.fillStyle(0xd8e8ff, Math.max(0, 0.55 - this.shotT * 1.2)); fx.fillRect(0, 0, W, H);
+        fx.fillStyle(0x0f1a33); fx.fillRect(cx - 70, 120, 140, 180); fx.lineStyle(6, 0x2a2440); fx.strokeRect(cx - 70, 120, 140, 180);
+        fx.lineStyle(3, 0xffffff, 1); fx.beginPath(); fx.moveTo(cx - 10, 125); fx.lineTo(cx + 15, 175); fx.lineTo(cx - 5, 190); fx.lineTo(cx + 25, 290); fx.strokePath();
+        break;
+      }
+      case 'fist': {
+        this.glow.setPosition(cx, H / 2).setTint(0xc9a8ff).setScale(4).setAlpha(0.4);
+        const s = 18 + this.shotT * 60;
+        drawClaw(g, cx, H / 2, s * 1.1, -Math.PI / 2, false, 0.5, 0x6a3cff);
+        drawClaw(g, cx, H / 2, s, -Math.PI / 2, false, 0.95);
+        break;
+      }
+      case 'giant': {
+        this.glow.setPosition(cx, H / 2).setTint(0x6a3cff).setScale(4.5).setAlpha(0.35);
+        const S = 10 + this.shotT * 3;
+        const pose = drawShadowBody(g, cx, S, time, 0, 0.95, -0.03, 0x05030c, 0.35);
+        g.fillStyle(0xc9a8ff, 0.95); g.fillEllipse(pose.head.x - 2.2 * S, pose.head.y + 0.3 * S, 1.3 * S, 0.6 * S); g.fillEllipse(pose.head.x + 2.2 * S, pose.head.y + 0.3 * S, 1.3 * S, 0.6 * S);
+        break;
+      }
+      case 'clock': {
+        this.glow.setPosition(cx, H / 2).setTint(0xffd27a).setScale(4).setAlpha(0.3);
+        const p = Math.min(1, this.shotT / 2.6), r = 120;
+        fx.lineStyle(6, 0xffd27a, 1); fx.strokeCircle(cx, H / 2 - 10, r);
+        for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2; fx.lineBetween(cx + Math.cos(a) * (r - 18), H / 2 - 10 + Math.sin(a) * (r - 18), cx + Math.cos(a) * (r - 4), H / 2 - 10 + Math.sin(a) * (r - 4)); }
+        const mins = 660 + p * 59, ma = -Math.PI / 2 + (mins % 60) / 60 * Math.PI * 2 * 8, ha = -Math.PI / 2 + (mins / 60 % 12) / 12 * Math.PI * 2;
+        fx.lineStyle(5, 0xffffff, 1); fx.lineBetween(cx, H / 2 - 10, cx + Math.cos(ma) * (r - 24), H / 2 - 10 + Math.sin(ma) * (r - 24));
+        fx.lineStyle(8, 0xffb347, 1); fx.lineBetween(cx, H / 2 - 10, cx + Math.cos(ha) * (r - 55), H / 2 - 10 + Math.sin(ha) * (r - 55));
+        if (Math.floor(this.shotT * 6) !== this.lastTick) { this.lastTick = Math.floor(this.shotT * 6); Sfx.tick(); }
+        if (!this.clockTxt) this.clockTxt = addText(this, cx, H / 2 + 130, '', 18, '#ffd27a').setOrigin(0.5).setDepth(6);
+        this.clockTxt.setVisible(true).setText(fmtClock(1380 + Math.floor(p * 59)));
+        break;
+      }
+      case 'hollowEyes': case 'hollow': {
+        const S = this.shot === 'hollow' ? 15 + this.shotT * 1.5 : 26;
+        this.glow.setPosition(cx, 260).setTint(0xff6a8a).setScale(4.5).setAlpha(0.3);
+        const pose = drawShadowBody(g, cx + 20, S, time, 0, 0.95, 0.04, 0x030208, 0.25);
+        const open = Math.min(1, this.shotT * 2.5);
+        g.fillStyle(0xffffff, 1); g.fillEllipse(pose.head.x - 2.6 * S, pose.head.y, 1.6 * S, 2.4 * S * open); g.fillEllipse(pose.head.x + 2.6 * S, pose.head.y, 1.6 * S, 2.4 * S * open);
+        g.fillStyle(0xff6a8a, 0.5 + 0.3 * Math.sin(time * 0.008)); g.fillCircle(pose.chest.x, pose.chest.y, 1.4 * S);
+        break;
+      }
+      case 'logo': {
+        this.glow.setPosition(cx, H / 2 - 30).setTint(0xff8a2a).setScale(4).setAlpha(0.35 + Math.sin(time * 0.02) * 0.03);
+        break;
+      }
+    }
+    if (this.smileTxt && this.shot !== 'miloSmile') this.smileTxt.setVisible(false);
+    if (this.clockTxt && this.shot !== 'clock') this.clockTxt.setVisible(false);
+  }
+}
+
+// The autopilot: plays the real game for the trailer recording.
+function autoBot(g) {
+  if (!g.kid) return;
+  const ptr = g.input.activePointer, cam = g.cameras.main, k = g.kid, K = g.keys;
+  K.A.isDown = false; K.D.isDown = false;
+  g._ab = g._ab || { holdF: 0, frame: 0, throwT: 0 };
+  const A = g._ab; A.frame++;
+  if (g.state === 'qte') { if (A.frame % 3 === 0) g.qteHit(); return; }
+  if (g.state !== 'play') return;
+  if (g.mode === 'dark') { K.D.isDown = true; return; }
+  if (g.chase && (k.x - g.chase.x < 150 || (!A.usedStop && g.roomT > 2.5))) { if (g.stopCool <= 0 && g.timeStop <= 0) A.usedStop = true; g.stopTime(); }
+  if (g.boss && !g.boss.defeated && g.boss.hand.st === 'aim' && g.stopCool <= 0 && g.boss.phase === 3 && !A.bossStop) { A.bossStop = true; g.stopTime(); }
+  const aim = (x, y) => { ptr.x = x - cam.scrollX; ptr.y = y; };
+  const b = g.boss, ms = g.monsters.filter(m => m.alive && !m.held && !m.thrown);
+  K.SPACE.isDown = false;
+  if (b && !b.defeated) {
+    const hd = b.hand;
+    if (hd.st === 'raise' || hd.st === 'aim' || hd.st === 'slam') { g.setForm('hand'); aim(hd.tx, FLOOR - 70); K.SPACE.isDown = true; return; }
+    if (b.stun > 0) {
+      const c = g.bossCore();
+      if (g.wolfCool <= 0 && !g.dash && A.frame % 2) { g.setForm('wolf'); aim(c.x, c.y); g.action(); return; }
+      g.setForm('hand'); aim(c.x, c.y); K.SPACE.isDown = true;
+      if (Math.hypot(g.hand.x - c.x, g.hand.y - c.y) < g.handR + 50 && g.cool <= 0) g.smash();
+      return;
+    }
+  }
+  if (g.R.type === 'wind' && g.gusts) {
+    const gu = g.gusts.find(x => x.state === 'warn' || (x.state === 'wait' && g.windT >= x.t - 1.2));
+    if (gu) { g.setForm('hand'); const cp = g.candlePos; aim(cp.x + (gu.side === 'L' ? -40 : 40), cp.y); return; }
+  }
+  if (g.held) {
+    const t = ms.find(m => m.type === 'brute') || ms[0]; A.holdF++;
+    if (t) { const dx = t.x - g.hand.x, dy = t.y - g.hand.y, d = Math.hypot(dx, dy) || 1; aim(g.hand.x + dx / d * 130, g.hand.y + dy / d * 130); }
+    if (A.holdF >= 7) { g.release(); A.holdF = 0; }
+    return;
+  }
+  if (!ms.length) { g.setForm(g.unlocked.includes('wolf') && A.frame % 400 < 200 ? 'wolf' : 'hand'); aim(k.x + 90, FLOOR - 170); return; }
+  const march = ms.filter(m => m.march), brutes = ms.filter(m => m.type === 'brute'), sn = ms.find(m => m.type === 'snuffer');
+  if (sn && Math.hypot(sn.x - g.candlePos.x, sn.y - g.candlePos.y) < 260) { g.setForm('hand'); aim(sn.x, sn.y); K.SPACE.isDown = true; if (Math.hypot(sn.x - g.hand.x, sn.y - g.hand.y) < g.handR * 1.2 + sn.r && g.cool <= 0) g.smash(); return; }
+  if (g.unlocked.includes('wolf') && g.wolfCool <= 0 && !g.dash && (march.length || brutes.length)) {
+    const t = (march.length ? march : brutes).sort((a, c) => Math.abs(a.x - k.x) - Math.abs(c.x - k.x))[0];
+    g.setForm('wolf'); aim(t.x + Math.sign(t.x - k.x) * 90, t.y); g.action(); return;
+  }
+  if (g.unlocked.includes('raven') && g.ravenCool <= 0 && ms.length >= 3) { const t = ms[0]; g.setForm('raven'); aim(t.x, t.y); g.action(); return; }
+  let t = null, bd = 1e9;
+  for (const m of ms) { const d = Math.hypot(m.x - k.x, m.y - (FLOOR - 32)) - (m.wind || m.lunge ? 200 : 0); if (d < bd) { bd = d; t = m; } }
+  g.setForm('hand'); aim(t.x, t.y);
+  const sh = g.hand.sh; K.SPACE.isDown = sh ? Math.hypot(t.x - sh.x, t.y - sh.y) > TUNE.reachPerScale * TUNE.scaleNormal * 0.9 : false;
+  if (Math.hypot(t.x - g.hand.x, t.y - g.hand.y) < g.handR * 1.2 + t.r && g.cool <= 0) {
+    if (t.type === 'wisp' && (brutes.length || ms.length >= 3)) { g.press(); A.holdF = 0; } else g.smash();
+  }
+}
+
+// ---------------- mute button ----------------
+(() => {
+  const btn = document.getElementById('mute');
+  const ON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>';
+  const OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path d="M17 9l5 6M22 9l-5 6"/></svg>';
+  window.syncMute = () => {
+    const m = AudioSys.muted;
+    btn.innerHTML = m ? OFF : ON;
+    btn.setAttribute('aria-pressed', String(m));
+    btn.setAttribute('aria-label', m ? 'Turn sound on' : 'Mute sound');
+    btn.title = m ? 'Sound off - click to turn on (M)' : 'Sound on - click to mute (M)';
+  };
+  btn.addEventListener('click', () => { AudioSys.ac(); AudioSys.toggleMute(); btn.blur(); });
+  window.syncMute();
+})();
+
+// =====================================================================
+(async () => {
+  try { await Promise.race([document.fonts.load('16px "Press Start 2P"'), new Promise(r => setTimeout(r, 2500))]); } catch (e) {}
+  window.game = new Phaser.Game({
+    type: Phaser.AUTO, parent: 'game', width: W, height: H, backgroundColor: '#04030a',
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+    scene: [Boot, Title, Intro, Teaser, Game, Ending],
+  });
+})();
+</script>
+</body>
+</html>
