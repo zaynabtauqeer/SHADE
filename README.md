@@ -1,19 +1,59 @@
-# SHADE — *You are his shadow.*
+<p align="center">
+  <img src="media/banner.jpg" alt="SHADE — Fire. Shadow. Time. You are his shadow." width="100%">
+</p>
 
-**Themes: 🔥 Fire · 🌑 Shadow · ⏳ Time** — made for the FAST NASCON '26 Vibe-Coding Game Jam.
+<p align="center">
+  <a href="https://github.com/zaynabtauqeer/SHADE/releases/latest"><img src="https://img.shields.io/badge/DOWNLOAD-Windows%20%7C%20macOS-ff8a3c?style=for-the-badge&logo=github" alt="Download"></a>
+  <a href="https://claude.ai/artifact/JyV3HBAgFuCkhDnzzM6NGt"><img src="https://img.shields.io/badge/PLAY-in%20your%20browser-7fe8ff?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Play in browser"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/%F0%9F%94%A5-FIRE-ff5a1f?style=flat-square">
+  <img src="https://img.shields.io/badge/%F0%9F%8C%91-SHADOW-5b3fa0?style=flat-square">
+  <img src="https://img.shields.io/badge/%E2%8F%B3-TIME-ffd27a?style=flat-square">
+  <img src="https://img.shields.io/badge/engine-Phaser%203-8a80b0?style=flat-square">
+  <img src="https://img.shields.io/badge/art%20%26%20audio-100%25%20code-c9a8ff?style=flat-square">
+  <img src="https://img.shields.io/badge/FAST%20NASCON-'26%20Game%20Jam-ffb347?style=flat-square">
+</p>
+
+<h3 align="center"><i>A scared kid. One candle. One terrifying night.<br>You are his shadow.</i></h3>
 
 Every night at 11:00 PM, little Milo lights one candle and walks through his house of nightmares.
 He is not alone. **You are his shadow** — and in the candlelight you can become anything:
 a giant, a wolf, a storm of ravens. Keep his flame alive, smash the creatures of the dark,
 and **stop time itself** as the clock ticks toward midnight, when the Hollow is waiting.
 
+<p align="center">
+  <img src="media/boss.gif" alt="Boss fight: perfect parry and finisher" width="85%">
+</p>
+
+## 📸 Screenshots
+
+<table>
+  <tr>
+    <td><img src="media/you.jpg" alt="And he has... you."></td>
+    <td><img src="media/wolf.jpg" alt="A wolf."></td>
+    <td><img src="media/stoptime.jpg" alt="Stop time."></td>
+  </tr>
+  <tr>
+    <td><img src="media/golden.jpg" alt="Golden nightling x5 combo"></td>
+    <td><img src="media/packhunt.jpg" alt="Wolf pack hunt"></td>
+    <td><img src="media/stopclock.jpg" alt="New power: stop the clock"></td>
+  </tr>
+  <tr>
+    <td><img src="media/attic.jpg" alt="11:59 PM — The Attic"></td>
+    <td><img src="media/parry.jpg" alt="Perfect parry"></td>
+    <td><img src="media/finisher.jpg" alt="+5000 finisher"></td>
+  </tr>
+</table>
+
 ## ▶ Play it
 
 | Platform | How |
 |---|---|
-| **Windows** | Download **`SHADE-windows-x64.zip`** from [Releases](../../releases/latest) → unzip → double-click **`SHADE.exe`** |
-| **macOS (Apple Silicon M1/M2/M3/M4)** | Download **`SHADE-mac-arm64.zip`** from [Releases](../../releases/latest) → unzip → see *Mac note* below |
-| **macOS (Intel)** | Download **`SHADE-mac-x64.zip`** from [Releases](../../releases/latest) → unzip → see *Mac note* below |
+| **Windows** | Download **`SHADE-windows-x64.zip`** from [Releases](https://github.com/zaynabtauqeer/SHADE/releases/latest) → unzip → double-click **`SHADE.exe`** |
+| **macOS (Apple Silicon M1/M2/M3/M4)** | Download **`SHADE-mac-arm64.zip`** from [Releases](https://github.com/zaynabtauqeer/SHADE/releases/latest) → unzip → see *Mac note* below |
+| **macOS (Intel)** | Download **`SHADE-mac-x64.zip`** from [Releases](https://github.com/zaynabtauqeer/SHADE/releases/latest) → unzip → see *Mac note* below |
 | **Any browser** | Open `game/index.html` (or run `python -m http.server` in `game/` and visit `localhost:8000`) |
 
 The executables work fully **offline** (the engine and font are bundled).
