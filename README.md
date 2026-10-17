@@ -77,6 +77,8 @@ xattr -cr SHADE.app && open SHADE.app
 | **Right-click / Space** | Giant shadow |
 | **1 · 2 · 3** | Switch form: Hand / Wolf (dash attack) / Raven (homing storm) |
 | **F** | **STOP TIME**: freezes every enemy for 3 s (costs wax) |
+| **A / D or ← / →** | Guide Milo through the dark (Basement room) |
+| **1 – 7** (title screen) | Jump straight to a room — e.g. **7** for the boss |
 | **ESC / P** | Pause (shows all controls) · **R** restart room · **X** quit |
 | **🔊 button** | Mute |
 | **F11** | Fullscreen (desktop app) |
